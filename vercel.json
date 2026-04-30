@@ -5,7 +5,7 @@
       "src": "server.js",
       "use": "@vercel/node",
       "config": {
-        "maxDuration": 10 // Limite de tempo para a função serverless (em segundos)
+        "maxDuration": 10
       }
     },
     {
