@@ -16,9 +16,19 @@ const MAX_FILE_SIZE_MB = 50; // Limite do Supabase Free
 const MAX_BODY_SIZE = isServerless ? 4.5 * 1024 * 1024 : 50 * 1024 * 1024;
 
 // Configuração Supabase (Vão nas variáveis de ambiente do Vercel depois)
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
-const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
+const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
+const supabaseKey = (process.env.SUPABASE_ANON_KEY || '').trim();
+
+let supabase = null;
+if (supabaseUrl && supabaseKey) {
+  try {
+    // Validação básica de URL para evitar crash na inicialização
+    new URL(supabaseUrl);
+    supabase = createClient(supabaseUrl, supabaseKey);
+  } catch (e) {
+    console.error("Erro ao inicializar Supabase: URL inválida ou malformada.");
+  }
+}
 
 const defaultSectors = [
   { id: "departamento-pessoal", name: "Departamento Pessoal" },
@@ -165,8 +175,12 @@ async function writeJson(filePath, data) {
 
 async function readUsers() {
   if (supabase) {
-    const { data, error } = await supabase.from('usuarios').select('*');
-    if (!error) return data.map(normalizeUser);
+    try {
+      const { data, error } = await supabase.from('usuarios').select('*');
+      if (!error && data) return data.map(normalizeUser);
+    } catch (e) {
+      console.error("Erro ao buscar usuários no Supabase:", e.message);
+    }
   }
 
   const data = await readJson(path.join(rootDir, "usuarios.json"), { usuarios: [] });
@@ -241,11 +255,15 @@ function publicSector(sector) {
 
 async function readSectors() {
   if (supabase) {
-    const { data, error } = await supabase.from('setores').select('*');
-    if (!error && data.length > 0) {
-      const sectorList = normalizeSectorsList(data);
-      updateSectorCache(sectorList);
-      return sectorList;
+    try {
+      const { data, error } = await supabase.from('setores').select('*');
+      if (!error && data && data.length > 0) {
+        const sectorList = normalizeSectorsList(data);
+        updateSectorCache(sectorList);
+        return sectorList;
+      }
+    } catch (e) {
+      console.error("Erro ao buscar setores no Supabase:", e.message);
     }
   }
 
@@ -1420,7 +1438,8 @@ async function serveStatic(request, response, pathname) {
 }
 
 async function handleRequest(request, response) {
-  const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host}`);
+  // Usa um fallback para o host para evitar erros de construção de URL no Vercel
+  const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
   try {
     if (request.method === "OPTIONS") {
