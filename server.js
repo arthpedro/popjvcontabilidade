@@ -1485,3 +1485,6 @@ async function start() {
 }
 
 start();
+
+// Exporta o handler para o Vercel
+module.exports = handleRequest;
