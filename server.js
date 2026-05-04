@@ -158,7 +158,6 @@ function normalizeUser(user, index = 0) {
 }
 
 async function readJson(filePath, fallback) {
-  console.log(`[readJson] Attempting to read: ${filePath}`);
   try {
     if (isServerless) return fallback;
     const content = await fs.readFile(filePath, "utf8");
@@ -177,7 +176,6 @@ async function readJson(filePath, fallback) {
 }
 
 async function writeJson(filePath, data) {
-  console.log(`[writeJson] Attempting to write: ${filePath}`);
   if (isServerless) {
     // Aqui você faria um: await supabase.from('config').upsert({ id: filePath, data })
     return;
@@ -198,7 +196,7 @@ async function readUsers() {
       if (!error && data && data.length > 0) {
         return data.map(normalizeUser);
       } else if (!error && data && data.length === 0) {
-        console.log("Populando usuários padrão no Supabase...");
+        console.log("Populando usuarios padrao no Supabase...");
         const usersToUpsert = defaultUsersData.map(user => ({
           ...user,
           senha: hashPassword(user.senha)
@@ -221,9 +219,10 @@ async function writeUsers(users) {
     // Hash passwords before upserting to Supabase
     const usersToUpsert = users.map(user => {
       const normalized = normalizeUser(user);
+      // Only hash if a new password is provided or it's a new user
       return {
         ...normalized,
-        senha: hashPassword(normalized.senha) // Ensure password is hashed
+        senha: normalized.senha.startsWith('$2a$') ? normalized.senha : hashPassword(normalized.senha) // Check if already hashed
       };
     });
     await supabase.from('usuarios').upsert(usersToUpsert);
@@ -283,28 +282,46 @@ async function readSectors() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('setores').select('*');
-      if (!error && data && data.length > 0) {
+      if (error) {
+        console.error("Erro ao buscar setores no Supabase:", error.message);
+        // Fallback to default if Supabase query fails
+        const sectorList = normalizeSectorsList(defaultSectors);
+        updateSectorCache(sectorList);
+        return sectorList;
+      } else if (data && data.length > 0) {
         const sectorList = normalizeSectorsList(data);
         updateSectorCache(sectorList);
+        console.log(`[readSectors] Sectors cache updated from Supabase. Current sectors:`, Array.from(sectors));
+        return sectorList;
+      } else {
+        console.log("Tabela 'setores' do Supabase vazia. Usando setores padrão.");
+        const sectorList = normalizeSectorsList(defaultSectors);
+        updateSectorCache(sectorList);
+        console.log(`[readSectors] Sectors cache updated with default sectors (Supabase empty). Current sectors:`, Array.from(sectors));
         return sectorList;
       }
     } catch (e) {
-      console.error("Erro ao buscar setores no Supabase:", e.message);
+      console.error("Erro inesperado ao interagir com Supabase (readSectors):", e.message);
+      // Fallback to default if Supabase interaction fails
+      const sectorList = normalizeSectorsList(defaultSectors);
+      updateSectorCache(sectorList);
+      console.log(`[readSectors] Sectors cache updated with default sectors (Supabase error). Current sectors:`, Array.from(sectors));
+      return sectorList;
     }
   }
 
+  // Fallback to local JSON if Supabase not configured or failed
+  let sectorList = [];
   try {
     const data = await readJson(path.join(rootDir, "dados", "setores.json"), { setores: defaultSectors });
-    const rawList = data && Array.isArray(data.setores) ? data.setores : defaultSectors;
-    let sectorList = normalizeSectorsList(rawList);
-
-    if (sectorList.length === 0) sectorList = normalizeSectorsList(defaultSectors);
-
-    updateSectorCache(sectorList);
-    return sectorList;
+    sectorList = normalizeSectorsList(data && Array.isArray(data.setores) ? data.setores : defaultSectors);
   } catch (err) {
-    return normalizeSectorsList(defaultSectors);
+    console.error("Erro ao ler setores do arquivo local:", err.message);
+    sectorList = normalizeSectorsList(defaultSectors);
   }
+  updateSectorCache(sectorList);
+  console.log(`[readSectors] Sectors cache updated from local/default. Current sectors:`, Array.from(sectors));
+  return sectorList;
 }
 
 async function writeSectors(sectorList) {
@@ -490,6 +507,7 @@ function getFolderPath(sectorId, folderName) {
   const sectorRoot = getSectorRoot(sectorId);
 
   if (!sectorRoot) {
+    console.warn(`[getExplorerPath] Sector root not found for sectorId: ${sectorId}.`);
     return null;
   }
 
@@ -507,7 +525,6 @@ function getExplorerPath(sectorId, relativePath = "") {
   const sectorRoot = getSectorRoot(sectorId);
 
   if (!sectorRoot) {
-    console.warn(`[getExplorerPath] Sector root not found for sectorId: ${sectorId}.`);
     return null;
   }
 
@@ -546,13 +563,11 @@ function parentRelativePath(relativePath) {
 async function listExplorerItems(sectorId, relativePath = "") {
   const current = getExplorerPath(sectorId, relativePath);
   if (!current) {
-    console.warn(`[listExplorerItems] getExplorerPath returned null for sectorId: ${sectorId}, path: ${relativePath}`);
     return null;
   }
 
   if (supabase) {
     const folderPath = current.relativePath;
-    console.log(`[listExplorerItems] Supabase: Listing bucket 'setores', path '${folderPath}'`);
     const { data, error } = await supabase.storage.from('setores').list(folderPath);
     
     if (error) throw error;
@@ -561,16 +576,15 @@ async function listExplorerItems(sectorId, relativePath = "") {
       caminho: current.relativePath,
       pai: parentRelativePath(current.relativePath),
       itens: data.map(item => ({
-        id: joinRelativePath(current.relativePath, item.name),
+        id: item.name,
         nome: item.name,
         tipo: item.id ? "file" : "folder",
-        caminho: joinRelativePath(current.relativePath, item.name),
+        caminho: item.name, // O frontend concatena isso para navegação
         tamanho: item.metadata?.size || null,
         atualizadoEm: item.updated_at || item.created_at,
         criadoEm: item.created_at
       })).sort((a, b) => (a.tipo === b.tipo ? a.nome.localeCompare(b.nome) : a.tipo === "folder" ? -1 : 1))
     };
-    // If data is empty, it will return { itens: [] }, which is not null.
   }
 
   try {
@@ -579,6 +593,7 @@ async function listExplorerItems(sectorId, relativePath = "") {
     if (!stat.isDirectory()) {
       return null;
     }
+    // ... rest of local filesystem logic
   } catch (error) {
     if (error.code === "ENOENT") {
       return null;
@@ -591,15 +606,21 @@ async function listExplorerItems(sectorId, relativePath = "") {
   const items = [];
 
   for (const entry of entries) {
-    const entryPath = path.join(current.absolutePath, entry.name);
-    const stat = await fs.stat(entryPath);
+    let stat;
+    try {
+       const entryPath = path.join(current.absolutePath, entry.name);
+       stat = await fs.stat(entryPath);
+    } catch(e) {
+       continue;
+    }
+    
     const type = entry.isDirectory() ? "folder" : "file";
 
     items.push({
-      id: joinRelativePath(current.relativePath, entry.name),
+      id: entry.name,
       nome: entry.name,
       tipo: type,
-      caminho: joinRelativePath(current.relativePath, entry.name),
+      caminho: entry.name,
       tamanho: type === "file" ? stat.size : null,
       atualizadoEm: stat.mtime.toISOString(),
       criadoEm: (stat.birthtime || stat.ctime).toISOString()
@@ -615,8 +636,8 @@ async function listExplorerItems(sectorId, relativePath = "") {
   });
 
   return {
-    caminho: current.relativePath,
-    pai: parentRelativePath(current.relativePath),
+    caminho: relativePath,
+    pai: parentRelativePath(relativePath),
     itens: items
   };
 }
@@ -625,7 +646,6 @@ async function sendExplorerDownload(response, sectorId, filePath) {
   const item = getExplorerPath(sectorId, filePath);
 
   if (!item) {
-    console.warn(`[sendExplorerDownload] getExplorerPath returned null for sectorId: ${sectorId}, path: ${filePath}`);
     sendJson(response, 404, { message: "Arquivo nao encontrado." });
     return;
   }
@@ -633,7 +653,6 @@ async function sendExplorerDownload(response, sectorId, filePath) {
   if (supabase) {
     const { data, error } = await supabase.storage.from('setores').download(item.relativePath);
     if (error) {
-      console.error(`[sendExplorerDownload] Supabase error downloading '${item.relativePath}':`, error.message);
       sendJson(response, 404, { message: "Arquivo não encontrado no Storage." });
       return;
     }
@@ -678,7 +697,6 @@ async function sendExplorerPreview(response, sectorId, filePath) {
   const item = getExplorerPath(sectorId, filePath);
 
   if (!item) {
-    console.warn(`[sendExplorerPreview] getExplorerPath returned null for sectorId: ${sectorId}, path: ${filePath}`);
     sendJson(response, 404, { message: "Arquivo nao encontrado." });
     return;
   }
@@ -688,7 +706,6 @@ async function sendExplorerPreview(response, sectorId, filePath) {
   if (supabase) {
     const { data, error } = await supabase.storage.from('setores').download(item.relativePath);
     if (error) {
-      console.error(`[sendExplorerPreview] Supabase error downloading for preview '${item.relativePath}':`, error.message);
       sendJson(response, 404, { message: "Arquivo não encontrado." });
       return;
     }
@@ -1061,7 +1078,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const result = await listExplorerItems(sectorId, currentPath);
 
     if (!result) {
-      console.warn(`[handlePublicFoldersApi GET explorer] listExplorerItems returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
       return;
     }
@@ -1181,6 +1197,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       const targetPath = path.join(current.absolutePath, nameValidation.itemName);
 
       if (supabase) {
+        console.log(`[handleFoldersApi POST upload] Supabase: Uploading '${fullPath}'`);
         const fullPath = joinRelativePath(current.relativePath, nameValidation.itemName);
         await supabase.storage.from('setores').upload(fullPath, upload.content, { contentType: mimeTypes[path.extname(fullPath)] });
         sendJson(response, 201, { ok: true });
@@ -1217,7 +1234,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const nameValidation = validateItemName(payload.nome);
 
     if (!item) {
-      console.warn(`[handleFoldersApi PUT rename] Item not found for path: ${payload.caminho}`);
       sendJson(response, 404, { message: "Item nao encontrado." });
       return;
     }
@@ -1228,6 +1244,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (supabase) {
+      console.log(`[handleFoldersApi PUT rename] Supabase: Moving '${item.relativePath}' to '${newPath}'`);
       const newPath = joinRelativePath(parentRelativePath(item.relativePath), nameValidation.itemName);
       await supabase.storage.from('setores').move(item.relativePath, newPath);
       sendJson(response, 200, { ok: true });
@@ -1286,7 +1303,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const item = getExplorerPath(sectorId, filePath);
 
     if (!item) {
-      console.warn(`[handleFoldersApi DELETE file] Item not found for path: ${filePath}`);
       sendJson(response, 404, { message: "Arquivo nao encontrado." });
       return;
     }
@@ -1294,6 +1310,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     if (supabase) {
       await supabase.storage.from('setores').remove([item.relativePath]);
       sendJson(response, 200, { ok: true });
+      console.log(`[handleFoldersApi DELETE file] Supabase: Removed '${item.relativePath}'`);
       return;
     }
 
@@ -1466,7 +1483,6 @@ async function serveStatic(request, response, pathname) {
   const cleanPath = appShellRoutes.has(pathname) ? "/index.html" : pathname;
   const extension = path.extname(cleanPath).toLowerCase();
 
-  console.log(`[serveStatic] Serving static file: ${cleanPath}, extension: ${extension}`);
   if (!mimeTypes[extension]) {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     response.end("Arquivo não encontrado.");
@@ -1492,7 +1508,6 @@ async function serveStatic(request, response, pathname) {
     response.end(content);
   } catch (error) {
     if (error.code === "ENOENT") {
-      console.warn(`[serveStatic] File not found: ${filePath}`);
       response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       response.end("Arquivo não encontrado.");
       return;
@@ -1503,6 +1518,10 @@ async function serveStatic(request, response, pathname) {
 }
 
 async function handleRequest(request, response) {
+  console.log(`[handleRequest] Invoked for URL: ${request.url}`);
+  console.log(`[handleRequest] isServerless: ${isServerless}`);
+  console.log(`[handleRequest] Supabase client initialized: ${!!supabase}`);
+  console.log(`[handleRequest] Current sectors (before readSectors):`, Array.from(sectors));
   // Usa um fallback para o host para evitar erros de construção de URL no Vercel
   const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
@@ -1546,7 +1565,6 @@ async function handleRequest(request, response) {
     await serveStatic(request, response, pathname);
   } catch (error) {
     console.error(error);
-    console.error(`[handleRequest] Error details: ${error.stack}`);
     const statusCode = error.code === 'ENOENT' ? 404 : 500;
     const message = statusCode === 404 ? "Recurso não encontrado" : "Erro interno do servidor.";
     sendJson(response, statusCode, { 
