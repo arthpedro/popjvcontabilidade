@@ -195,11 +195,7 @@ async function readUsers() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('usuarios').select('*');
-      if (error) {
-        console.error("Erro ao buscar usuários no Supabase:", error.message);
-        // Fallback to default if Supabase query fails
-        return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
-      } else if (data && data.length > 0) {
+      if (!error && data && data.length > 0) {
         return data.map(normalizeUser);
       } else if (!error && data && data.length === 0) {
         console.log("Populando usuários padrão no Supabase...");
@@ -207,28 +203,17 @@ async function readUsers() {
           ...user,
           senha: hashPassword(user.senha)
         }));
-        const { error: upsertError } = await supabase.from('usuarios').upsert(usersToUpsert);
-        if (upsertError) {
-          console.error("Erro ao popular usuários padrão no Supabase:", upsertError.message);
-        }
+        await supabase.from('usuarios').upsert(usersToUpsert);
         return usersToUpsert.map(normalizeUser);
       }
     } catch (e) {
-      console.error("Erro inesperado ao interagir com Supabase (readUsers):", e.message);
-      // Fallback to default if Supabase interaction fails
-      return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+      console.error("Erro Supabase readUsers:", e.message);
     }
   }
 
-  // Fallback to local JSON if Supabase not configured or failed
-  try {
-    const fallback = { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) };
-    const data = await readJson(path.join(rootDir, "usuarios.json"), fallback);
-    return (Array.isArray(data.usuarios) ? data.usuarios : []).map(normalizeUser);
-  } catch (err) {
-    console.error("Erro ao ler usuários do arquivo local:", err.message);
-    return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
-  }
+  const fallback = { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) };
+  const data = await readJson(path.join(rootDir, "usuarios.json"), fallback);
+  return (Array.isArray(data.usuarios) ? data.usuarios : []).map(normalizeUser);
 }
 
 async function writeUsers(users) {
@@ -236,10 +221,9 @@ async function writeUsers(users) {
     // Hash passwords before upserting to Supabase
     const usersToUpsert = users.map(user => {
       const normalized = normalizeUser(user);
-      // Only hash if a new password is provided or it's a new user
       return {
         ...normalized,
-        senha: normalized.senha.startsWith('$2a$') ? normalized.senha : hashPassword(normalized.senha) // Check if already hashed
+        senha: hashPassword(normalized.senha) // Ensure password is hashed
       };
     });
     await supabase.from('usuarios').upsert(usersToUpsert);
@@ -299,46 +283,28 @@ async function readSectors() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('setores').select('*');
-      if (error) {
-        console.error("Erro ao buscar setores no Supabase:", error.message);
-        // Fallback to default if Supabase query fails
-        const sectorList = normalizeSectorsList(defaultSectors);
-        updateSectorCache(sectorList);
-        return sectorList;
-      } else if (data && data.length > 0) {
+      if (!error && data && data.length > 0) {
         const sectorList = normalizeSectorsList(data);
         updateSectorCache(sectorList);
-        console.log(`[readSectors] Sectors cache updated from Supabase. Current sectors:`, Array.from(sectors));
-        return sectorList;
-      } else {
-        console.log("Tabela 'setores' do Supabase vazia. Usando setores padrão.");
-        const sectorList = normalizeSectorsList(defaultSectors);
-        updateSectorCache(sectorList);
-        console.log(`[readSectors] Sectors cache updated with default sectors (Supabase empty). Current sectors:`, Array.from(sectors));
         return sectorList;
       }
     } catch (e) {
-      console.error("Erro inesperado ao interagir com Supabase (readSectors):", e.message);
-      // Fallback to default if Supabase interaction fails
-      const sectorList = normalizeSectorsList(defaultSectors);
-      updateSectorCache(sectorList);
-      console.log(`[readSectors] Sectors cache updated with default sectors (Supabase error). Current sectors:`, Array.from(sectors));
-      return sectorList;
+      console.error("Erro ao buscar setores no Supabase:", e.message);
     }
   }
 
-  // Fallback to local JSON if Supabase not configured or failed
-  let sectorList = [];
   try {
     const data = await readJson(path.join(rootDir, "dados", "setores.json"), { setores: defaultSectors });
-    sectorList = normalizeSectorsList(data && Array.isArray(data.setores) ? data.setores : defaultSectors);
+    const rawList = data && Array.isArray(data.setores) ? data.setores : defaultSectors;
+    let sectorList = normalizeSectorsList(rawList);
+
+    if (sectorList.length === 0) sectorList = normalizeSectorsList(defaultSectors);
+
+    updateSectorCache(sectorList);
+    return sectorList;
   } catch (err) {
-    console.error("Erro ao ler setores do arquivo local:", err.message);
-    sectorList = normalizeSectorsList(defaultSectors);
+    return normalizeSectorsList(defaultSectors);
   }
-  updateSectorCache(sectorList);
-  console.log(`[readSectors] Sectors cache updated from local/default. Current sectors:`, Array.from(sectors));
-  return sectorList;
 }
 
 async function writeSectors(sectorList) {
@@ -457,7 +423,6 @@ async function ensureSectorRoots() {
 }
 
 function getSectorRoot(sectorId) {
-  console.log(`[getSectorRoot] Checking for sectorId: ${sectorId}. Current sectors in cache:`, Array.from(sectors));
   if (!sectors.has(sectorId)) {
     return null;
   }
@@ -525,7 +490,6 @@ function getFolderPath(sectorId, folderName) {
   const sectorRoot = getSectorRoot(sectorId);
 
   if (!sectorRoot) {
-    console.warn(`[getExplorerPath] Sector root not found for sectorId: ${sectorId}.`);
     return null;
   }
 
@@ -543,6 +507,7 @@ function getExplorerPath(sectorId, relativePath = "") {
   const sectorRoot = getSectorRoot(sectorId);
 
   if (!sectorRoot) {
+    console.warn(`[getExplorerPath] Sector root not found for sectorId: ${sectorId}.`);
     return null;
   }
 
@@ -614,7 +579,6 @@ async function listExplorerItems(sectorId, relativePath = "") {
     if (!stat.isDirectory()) {
       return null;
     }
-    // ... rest of local filesystem logic
   } catch (error) {
     if (error.code === "ENOENT") {
       return null;
@@ -1097,6 +1061,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const result = await listExplorerItems(sectorId, currentPath);
 
     if (!result) {
+      console.warn(`[handlePublicFoldersApi GET explorer] listExplorerItems returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
       return;
     }
@@ -1216,7 +1181,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       const targetPath = path.join(current.absolutePath, nameValidation.itemName);
 
       if (supabase) {
-        console.log(`[handleFoldersApi POST upload] Supabase: Uploading '${fullPath}'`);
         const fullPath = joinRelativePath(current.relativePath, nameValidation.itemName);
         await supabase.storage.from('setores').upload(fullPath, upload.content, { contentType: mimeTypes[path.extname(fullPath)] });
         sendJson(response, 201, { ok: true });
@@ -1264,7 +1228,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (supabase) {
-      console.log(`[handleFoldersApi PUT rename] Supabase: Moving '${item.relativePath}' to '${newPath}'`);
       const newPath = joinRelativePath(parentRelativePath(item.relativePath), nameValidation.itemName);
       await supabase.storage.from('setores').move(item.relativePath, newPath);
       sendJson(response, 200, { ok: true });
@@ -1331,7 +1294,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     if (supabase) {
       await supabase.storage.from('setores').remove([item.relativePath]);
       sendJson(response, 200, { ok: true });
-      console.log(`[handleFoldersApi DELETE file] Supabase: Removed '${item.relativePath}'`);
       return;
     }
 
@@ -1475,7 +1437,6 @@ async function handlePublicFoldersApi(request, response, pathname, searchParams)
     const result = await listExplorerItems(sectorId, currentPath);
 
     if (!result) {
-      console.warn(`[handlePublicFoldersApi GET explorer] listExplorerItems returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
       return;
     }
@@ -1542,10 +1503,6 @@ async function serveStatic(request, response, pathname) {
 }
 
 async function handleRequest(request, response) {
-  console.log(`[handleRequest] Invoked for URL: ${request.url}`);
-  console.log(`[handleRequest] isServerless: ${isServerless}`);
-  console.log(`[handleRequest] Supabase client initialized: ${!!supabase}`);
-  console.log(`[handleRequest] Current sectors (before readSectors):`, Array.from(sectors));
   // Usa um fallback para o host para evitar erros de construção de URL no Vercel
   const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
@@ -1553,7 +1510,6 @@ async function handleRequest(request, response) {
     // Garantir sincronização de cache em ambiente Serverless
     if (isServerless) {
       await readSectors();
-      console.log(`[handleRequest] Current sectors (after readSectors):`, Array.from(sectors));
     }
 
     if (request.method === "OPTIONS") {
