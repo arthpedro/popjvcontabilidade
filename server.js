@@ -6,7 +6,7 @@ const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
 
 // No ambiente Serverless (Vercel), não usamos caminhos locais para dados
-const rootDir = __dirname;
+const rootDir = process.cwd();
 const dataDir = path.join(rootDir, "dados");
 const sectorsDir = path.join(dataDir, "setores");
 const port = Number(process.env.PORT) || 3000;

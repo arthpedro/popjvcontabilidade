@@ -2,11 +2,11 @@
   "version": 2,
   "functions": {
     "server.js": {
-      "maxDuration": 10
+      "maxDuration": 10,
+      "includeFiles": "{*.html,*.js,*.css,img/**,dados/**}"
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/server.js" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    { "source": "/(.*)", "destination": "/server.js" }
   ]
 }
