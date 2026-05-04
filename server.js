@@ -193,48 +193,25 @@ async function readUsers() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('usuarios').select('*');
-      if (!error && data) return data.map(normalizeUser);
-    } catch (e) {
-      console.error("Erro ao buscar usuários no Supabase:", e.message);
-    }
-  }
-
-  if (supabase) {
-    try {
-      const { data, error } = await supabase.from('usuarios').select('*');
       if (!error && data && data.length > 0) {
         return data.map(normalizeUser);
       } else if (!error && data && data.length === 0) {
-        console.log("Tabela 'usuarios' do Supabase vazia. Populando com usuários padrão.");
+        console.log("Populando usuários padrão no Supabase...");
         const usersToUpsert = defaultUsersData.map(user => ({
           ...user,
-          senha: hashPassword(user.senha) // Hash the password before upsert
+          senha: hashPassword(user.senha)
         }));
-        const { error: upsertError } = await supabase.from('usuarios').upsert(usersToUpsert);
-        if (upsertError) {
-          console.error("Erro ao popular usuários padrão no Supabase:", upsertError.message);
-        }
-        return usersToUpsert.map(normalizeUser); // Return the newly inserted users
+        await supabase.from('usuarios').upsert(usersToUpsert);
+        return usersToUpsert.map(normalizeUser);
       }
     } catch (e) {
-      console.error("Erro ao buscar ou popular usuários no Supabase:", e.message);
-      // Fallback to hashed default users if Supabase call fails
-      return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+      console.error("Erro Supabase readUsers:", e.message);
     }
   }
 
-  const data = await readJson(path.join(rootDir, "usuarios.json"), { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) });
-  const rawUsers = Array.isArray(data.usuarios) ? data.usuarios : [];
-  const users = rawUsers.map(normalizeUser);
-  const needsRewrite = users.length !== data.usuarios?.length || rawUsers.some((user, index) => {
-    return user.permissao !== undefined || user.perfil !== users[index].perfil;
-  });
-
-  if (needsRewrite && !isServerless) {
-    await writeUsers(users);
-  }
-
-  return users;
+  const fallback = { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) };
+  const data = await readJson(path.join(rootDir, "usuarios.json"), fallback);
+  return (Array.isArray(data.usuarios) ? data.usuarios : []).map(normalizeUser);
 }
 
 async function writeUsers(users) {
@@ -1511,6 +1488,11 @@ async function handleRequest(request, response) {
   const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
   try {
+    // Garantir sincronização de cache em ambiente Serverless
+    if (isServerless) {
+      await readSectors();
+    }
+
     if (request.method === "OPTIONS") {
       response.writeHead(204, corsHeaders);
       response.end();
