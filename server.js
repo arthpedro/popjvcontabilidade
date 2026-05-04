@@ -140,16 +140,14 @@ function normalizeUser(user, index = 0) {
 }
 
 async function readJson(filePath, fallback) {
-  // Se estivermos no Vercel, aqui buscaríamos do Supabase/MongoDB em vez do FS
-  if (isServerless) {
-    // Mock de chamada ao banco de dados externo
-    return fallback; 
-  }
-
   try {
+    if (isServerless) return fallback;
     const content = await fs.readFile(filePath, "utf8");
     return JSON.parse(content);
   } catch (error) {
+    if (error instanceof SyntaxError) {
+      console.error(`Erro de sintaxe no JSON em ${filePath}:`, error.message);
+    }
     if (error.code === "ENOENT") {
       if (!isServerless) await writeJson(filePath, fallback);
       return fallback;
@@ -267,15 +265,18 @@ async function readSectors() {
     }
   }
 
-  const data = await readJson(path.join(rootDir, "dados", "setores.json"), { setores: defaultSectors });
-  let sectorList = normalizeSectorsList(Array.isArray(data.setores) ? data.setores : []);
+  try {
+    const data = await readJson(path.join(rootDir, "dados", "setores.json"), { setores: defaultSectors });
+    const rawList = data && Array.isArray(data.setores) ? data.setores : defaultSectors;
+    let sectorList = normalizeSectorsList(rawList);
 
-  if (sectorList.length === 0) {
-    sectorList = normalizeSectorsList(defaultSectors);
+    if (sectorList.length === 0) sectorList = normalizeSectorsList(defaultSectors);
+
+    updateSectorCache(sectorList);
+    return sectorList;
+  } catch (err) {
+    return normalizeSectorsList(defaultSectors);
   }
-
-  updateSectorCache(sectorList);
-  return sectorList;
 }
 
 async function writeSectors(sectorList) {
@@ -513,7 +514,6 @@ function parentRelativePath(relativePath) {
 
 async function listExplorerItems(sectorId, relativePath = "") {
   const current = getExplorerPath(sectorId, relativePath);
-
   if (!current) {
     return null;
   }
@@ -729,10 +729,24 @@ function parseMultipartFile(request, body) {
 
 async function listSectorFolders(sectorId) {
   const sectorRoot = getSectorRoot(sectorId);
-
-  if (!sectorRoot) {
-    return null;
+  
+  // No Vercel, buscamos as pastas diretamente no Storage do Supabase
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.storage.from('setores').list('', { sortBy: { column: 'name', order: 'asc' } });
+      if (error) throw error;
+      // Retorna apenas itens que não possuem ID (no Supabase Storage, itens sem ID são pastas)
+      return data.filter(item => !item.id).map(folder => ({
+        id: folder.name,
+        nome: folder.name,
+        criadoEm: folder.created_at
+      }));
+    } catch (e) {
+      console.error("Erro ao listar pastas no Supabase:", e.message);
+    }
   }
+
+  if (isServerless || !sectorRoot) return [];
 
   await fs.mkdir(sectorRoot, { recursive: true });
   const entries = await fs.readdir(sectorRoot, { withFileTypes: true });
@@ -950,15 +964,12 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     const sectorRoot = path.join(sectorsDir, validation.sector.id);
 
-    try {
-      await fs.mkdir(sectorRoot);
-    } catch (error) {
-      if (error.code === "EEXIST") {
-        sendJson(response, 409, { message: "Ja existe uma pasta para esse setor." });
-        return;
+    if (!isServerless) {
+      try {
+        await fs.mkdir(sectorRoot);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
       }
-
-      throw error;
     }
 
     const nextSectors = await writeSectors([...sectorList, validation.sector]);
@@ -994,7 +1005,9 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       return;
     }
 
-    await fs.rm(resolvedSectorRoot, { recursive: true, force: true });
+    if (!isServerless) {
+      await fs.rm(resolvedSectorRoot, { recursive: true, force: true });
+    }
 
     const nextSectors = await writeSectors(sectorList.filter((item) => item.id !== sector.id));
     sendJson(response, 200, {
@@ -1042,6 +1055,13 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
       if (!currentStat.isDirectory()) {
         sendJson(response, 400, { message: "O destino selecionado nao e uma pasta." });
+        return;
+      }
+
+      if (supabase) {
+        // No Supabase, pastas são criadas automaticamente ao subir um arquivo .placeholder ou similar
+        // Para manter a lógica, apenas retornamos sucesso já que o Storage é virtual
+        sendJson(response, 201, { ok: true });
         return;
       }
 
@@ -1357,10 +1377,10 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 }
 
 async function handlePublicFoldersApi(request, response, pathname, searchParams) {
-  const sectorsCollection = pathname === "/api/public/setores";
-  const explorerMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/explorer$/);
-  const downloadMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/download$/);
-  const previewMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/preview$/);
+  const sectorsCollection = pathname === "/api/public/setores" || pathname === "/api/public/setores/";
+  const explorerMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/explorer\/?$/);
+  const downloadMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/download\/?$/);
+  const previewMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/preview\/?$/);
 
   if (sectorsCollection && request.method === "GET") {
     const sectorList = await readSectors();
@@ -1486,6 +1506,11 @@ async function handleRequest(request, response) {
 }
 
 async function start() {
+  // Validação de ambiente crítica
+  if (isServerless && !supabaseUrl) {
+    console.warn("Aviso: SUPABASE_URL não configurada. O sistema funcionará apenas em modo leitura estática.");
+  }
+
   // No Vercel, o ambiente serverless não requer o início manual do servidor via .listen()
   // O Vercel gerencia o ciclo de vida da requisição automaticamente.
   if (isServerless) return;

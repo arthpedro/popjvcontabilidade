@@ -1008,9 +1008,15 @@ async function apiRequest(url, options = {}) {
   }
 
   const response = await fetch(apiUrl, requestOptions);
-  const data = await response.json().catch(() => ({}));
+  let data;
+  try {
+    data = await response.json();
+  } catch (e) {
+    data = { message: "Erro ao processar resposta do servidor." };
+  }
 
   if (!response.ok) {
+    console.error(`Erro API (${response.status}):`, data);
     throw new Error(data.message || "Não foi possível concluir a operação.");
   }
 
@@ -1130,18 +1136,27 @@ async function uploadSectorFile(sectorId, file) {
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await fetch(`${apiBaseUrl}/api/setores/${encodeURIComponent(sectorId)}/upload?path=${encodeURIComponent(currentExplorerPath)}`, {
-    method: "POST",
-    headers: getSessionUserHeader(),
-    body: formData
-  });
-  const data = await response.json().catch(() => ({}));
+  try {
+    const response = await fetch(`${apiBaseUrl}/api/setores/${encodeURIComponent(sectorId)}/upload?path=${encodeURIComponent(currentExplorerPath)}`, {
+      method: "POST",
+      headers: getSessionUserHeader(),
+      body: formData
+    });
+    
+    let data;
+    try {
+      data = await response.json();
+    } catch(e) {
+      data = {};
+    }
 
-  if (!response.ok) {
-    throw new Error(data.message || "Nao foi possivel enviar o arquivo.");
+    if (!response.ok) {
+      throw new Error(data.message || "Não foi possível enviar o arquivo.");
+    }
+    return data;
+  } catch (error) {
+    throw error;
   }
-
-  return data;
 }
 
 function normalizeUserProfile(value) {
@@ -2577,19 +2592,25 @@ async function handleUploadFiles() {
     return;
   }
 
+  const originalBtnText = uploadButton.textContent;
+  uploadButton.disabled = true;
+  uploadButton.textContent = "Enviando...";
+
   try {
-    // upload each selected file sequentially
+    showToast(`Iniciando upload de ${fileInput.files.length} arquivo(s)...`, "info");
     for (const file of Array.from(fileInput.files)) {
       await uploadSectorFile(selectedSector.id, file);
     }
 
-    // reset input and refresh view
     fileInput.value = "";
     await loadExplorerPath(currentExplorerPath, { pushHistory: false });
     showToast("Upload concluído.");
   } catch (error) {
     fileInput.value = "";
-    showToast(error.message || "Erro no upload.", "error");
+    showToast(error.message || "Erro durante o upload.", "error");
+  } finally {
+    uploadButton.disabled = false;
+    uploadButton.textContent = originalBtnText;
   }
 }
 
