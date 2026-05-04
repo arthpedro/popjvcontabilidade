@@ -1,0 +1,24 @@
+{
+  "setores": [
+    {
+      "id": "contabil",
+      "name": "Contábil"
+    },
+    {
+      "id": "departamento-pessoal",
+      "name": "Departamento Pessoal"
+    },
+    {
+      "id": "fiscal",
+      "name": "Fiscal"
+    },
+    {
+      "id": "legalizacao-processos",
+      "name": "Legalização e Processos"
+    },
+    {
+      "id": "ti",
+      "name": "T.I"
+    }
+  ]
+}
