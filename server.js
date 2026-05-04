@@ -158,6 +158,7 @@ function normalizeUser(user, index = 0) {
 }
 
 async function readJson(filePath, fallback) {
+  console.log(`[readJson] Attempting to read: ${filePath}`);
   try {
     if (isServerless) return fallback;
     const content = await fs.readFile(filePath, "utf8");
@@ -176,6 +177,7 @@ async function readJson(filePath, fallback) {
 }
 
 async function writeJson(filePath, data) {
+  console.log(`[writeJson] Attempting to write: ${filePath}`);
   if (isServerless) {
     // Aqui você faria um: await supabase.from('config').upsert({ id: filePath, data })
     return;
@@ -193,7 +195,11 @@ async function readUsers() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('usuarios').select('*');
-      if (!error && data && data.length > 0) {
+      if (error) {
+        console.error("Erro ao buscar usuários no Supabase:", error.message);
+        // Fallback to default if Supabase query fails
+        return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+      } else if (data && data.length > 0) {
         return data.map(normalizeUser);
       } else if (!error && data && data.length === 0) {
         console.log("Populando usuários padrão no Supabase...");
@@ -201,17 +207,28 @@ async function readUsers() {
           ...user,
           senha: hashPassword(user.senha)
         }));
-        await supabase.from('usuarios').upsert(usersToUpsert);
+        const { error: upsertError } = await supabase.from('usuarios').upsert(usersToUpsert);
+        if (upsertError) {
+          console.error("Erro ao popular usuários padrão no Supabase:", upsertError.message);
+        }
         return usersToUpsert.map(normalizeUser);
       }
     } catch (e) {
-      console.error("Erro Supabase readUsers:", e.message);
+      console.error("Erro inesperado ao interagir com Supabase (readUsers):", e.message);
+      // Fallback to default if Supabase interaction fails
+      return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
     }
   }
 
-  const fallback = { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) };
-  const data = await readJson(path.join(rootDir, "usuarios.json"), fallback);
-  return (Array.isArray(data.usuarios) ? data.usuarios : []).map(normalizeUser);
+  // Fallback to local JSON if Supabase not configured or failed
+  try {
+    const fallback = { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) };
+    const data = await readJson(path.join(rootDir, "usuarios.json"), fallback);
+    return (Array.isArray(data.usuarios) ? data.usuarios : []).map(normalizeUser);
+  } catch (err) {
+    console.error("Erro ao ler usuários do arquivo local:", err.message);
+    return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+  }
 }
 
 async function writeUsers(users) {
@@ -219,9 +236,10 @@ async function writeUsers(users) {
     // Hash passwords before upserting to Supabase
     const usersToUpsert = users.map(user => {
       const normalized = normalizeUser(user);
+      // Only hash if a new password is provided or it's a new user
       return {
         ...normalized,
-        senha: hashPassword(normalized.senha) // Ensure password is hashed
+        senha: normalized.senha.startsWith('$2a$') ? normalized.senha : hashPassword(normalized.senha) // Check if already hashed
       };
     });
     await supabase.from('usuarios').upsert(usersToUpsert);
@@ -281,28 +299,46 @@ async function readSectors() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('setores').select('*');
-      if (!error && data && data.length > 0) {
+      if (error) {
+        console.error("Erro ao buscar setores no Supabase:", error.message);
+        // Fallback to default if Supabase query fails
+        const sectorList = normalizeSectorsList(defaultSectors);
+        updateSectorCache(sectorList);
+        return sectorList;
+      } else if (data && data.length > 0) {
         const sectorList = normalizeSectorsList(data);
         updateSectorCache(sectorList);
+        console.log(`[readSectors] Sectors cache updated from Supabase. Current sectors:`, Array.from(sectors));
+        return sectorList;
+      } else {
+        console.log("Tabela 'setores' do Supabase vazia. Usando setores padrão.");
+        const sectorList = normalizeSectorsList(defaultSectors);
+        updateSectorCache(sectorList);
+        console.log(`[readSectors] Sectors cache updated with default sectors (Supabase empty). Current sectors:`, Array.from(sectors));
         return sectorList;
       }
     } catch (e) {
-      console.error("Erro ao buscar setores no Supabase:", e.message);
+      console.error("Erro inesperado ao interagir com Supabase (readSectors):", e.message);
+      // Fallback to default if Supabase interaction fails
+      const sectorList = normalizeSectorsList(defaultSectors);
+      updateSectorCache(sectorList);
+      console.log(`[readSectors] Sectors cache updated with default sectors (Supabase error). Current sectors:`, Array.from(sectors));
+      return sectorList;
     }
   }
 
+  // Fallback to local JSON if Supabase not configured or failed
+  let sectorList = [];
   try {
     const data = await readJson(path.join(rootDir, "dados", "setores.json"), { setores: defaultSectors });
-    const rawList = data && Array.isArray(data.setores) ? data.setores : defaultSectors;
-    let sectorList = normalizeSectorsList(rawList);
-
-    if (sectorList.length === 0) sectorList = normalizeSectorsList(defaultSectors);
-
-    updateSectorCache(sectorList);
-    return sectorList;
+    sectorList = normalizeSectorsList(data && Array.isArray(data.setores) ? data.setores : defaultSectors);
   } catch (err) {
-    return normalizeSectorsList(defaultSectors);
+    console.error("Erro ao ler setores do arquivo local:", err.message);
+    sectorList = normalizeSectorsList(defaultSectors);
   }
+  updateSectorCache(sectorList);
+  console.log(`[readSectors] Sectors cache updated from local/default. Current sectors:`, Array.from(sectors));
+  return sectorList;
 }
 
 async function writeSectors(sectorList) {
@@ -421,6 +457,7 @@ async function ensureSectorRoots() {
 }
 
 function getSectorRoot(sectorId) {
+  console.log(`[getSectorRoot] Checking for sectorId: ${sectorId}. Current sectors in cache:`, Array.from(sectors));
   if (!sectors.has(sectorId)) {
     return null;
   }
@@ -488,6 +525,7 @@ function getFolderPath(sectorId, folderName) {
   const sectorRoot = getSectorRoot(sectorId);
 
   if (!sectorRoot) {
+    console.warn(`[getExplorerPath] Sector root not found for sectorId: ${sectorId}.`);
     return null;
   }
 
@@ -514,6 +552,8 @@ function getExplorerPath(sectorId, relativePath = "") {
     return null;
   }
 
+  // In serverless, absolutePath is not meaningful for Supabase Storage
+  // We only care about relativePath for Supabase Storage operations
   const resolvedRoot = path.resolve(sectorRoot);
   const resolvedItem = path.resolve(sectorRoot, normalized.relativePath);
   const isInsideRoot = resolvedItem === resolvedRoot || resolvedItem.startsWith(`${resolvedRoot}${path.sep}`);
@@ -541,11 +581,13 @@ function parentRelativePath(relativePath) {
 async function listExplorerItems(sectorId, relativePath = "") {
   const current = getExplorerPath(sectorId, relativePath);
   if (!current) {
+    console.warn(`[listExplorerItems] getExplorerPath returned null for sectorId: ${sectorId}, path: ${relativePath}`);
     return null;
   }
 
   if (supabase) {
     const folderPath = current.relativePath;
+    console.log(`[listExplorerItems] Supabase: Listing bucket 'setores', path '${folderPath}'`);
     const { data, error } = await supabase.storage.from('setores').list(folderPath);
     
     if (error) throw error;
@@ -563,6 +605,7 @@ async function listExplorerItems(sectorId, relativePath = "") {
         criadoEm: item.created_at
       })).sort((a, b) => (a.tipo === b.tipo ? a.nome.localeCompare(b.nome) : a.tipo === "folder" ? -1 : 1))
     };
+    // If data is empty, it will return { itens: [] }, which is not null.
   }
 
   try {
@@ -571,6 +614,7 @@ async function listExplorerItems(sectorId, relativePath = "") {
     if (!stat.isDirectory()) {
       return null;
     }
+    // ... rest of local filesystem logic
   } catch (error) {
     if (error.code === "ENOENT") {
       return null;
@@ -617,6 +661,7 @@ async function sendExplorerDownload(response, sectorId, filePath) {
   const item = getExplorerPath(sectorId, filePath);
 
   if (!item) {
+    console.warn(`[sendExplorerDownload] getExplorerPath returned null for sectorId: ${sectorId}, path: ${filePath}`);
     sendJson(response, 404, { message: "Arquivo nao encontrado." });
     return;
   }
@@ -624,6 +669,7 @@ async function sendExplorerDownload(response, sectorId, filePath) {
   if (supabase) {
     const { data, error } = await supabase.storage.from('setores').download(item.relativePath);
     if (error) {
+      console.error(`[sendExplorerDownload] Supabase error downloading '${item.relativePath}':`, error.message);
       sendJson(response, 404, { message: "Arquivo não encontrado no Storage." });
       return;
     }
@@ -668,6 +714,7 @@ async function sendExplorerPreview(response, sectorId, filePath) {
   const item = getExplorerPath(sectorId, filePath);
 
   if (!item) {
+    console.warn(`[sendExplorerPreview] getExplorerPath returned null for sectorId: ${sectorId}, path: ${filePath}`);
     sendJson(response, 404, { message: "Arquivo nao encontrado." });
     return;
   }
@@ -677,6 +724,7 @@ async function sendExplorerPreview(response, sectorId, filePath) {
   if (supabase) {
     const { data, error } = await supabase.storage.from('setores').download(item.relativePath);
     if (error) {
+      console.error(`[sendExplorerPreview] Supabase error downloading for preview '${item.relativePath}':`, error.message);
       sendJson(response, 404, { message: "Arquivo não encontrado." });
       return;
     }
@@ -1142,6 +1190,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const current = getExplorerPath(sectorId, currentPath);
 
     if (!current) {
+      console.warn(`[handleFoldersApi POST explorer] getExplorerPath returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
       return;
     }
@@ -1159,6 +1208,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       const nameValidation = validateItemName(upload?.filename);
 
       if (!upload || nameValidation.error) {
+      console.warn(`[handleFoldersApi POST upload] Invalid upload or filename: ${nameValidation.error || 'no upload'}`);
         sendJson(response, 400, { message: "Selecione um arquivo com nome valido." });
         return;
       }
@@ -1166,6 +1216,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       const targetPath = path.join(current.absolutePath, nameValidation.itemName);
 
       if (supabase) {
+        console.log(`[handleFoldersApi POST upload] Supabase: Uploading '${fullPath}'`);
         const fullPath = joinRelativePath(current.relativePath, nameValidation.itemName);
         await supabase.storage.from('setores').upload(fullPath, upload.content, { contentType: mimeTypes[path.extname(fullPath)] });
         sendJson(response, 201, { ok: true });
@@ -1202,6 +1253,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const nameValidation = validateItemName(payload.nome);
 
     if (!item) {
+      console.warn(`[handleFoldersApi PUT rename] Item not found for path: ${payload.caminho}`);
       sendJson(response, 404, { message: "Item nao encontrado." });
       return;
     }
@@ -1212,6 +1264,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (supabase) {
+      console.log(`[handleFoldersApi PUT rename] Supabase: Moving '${item.relativePath}' to '${newPath}'`);
       const newPath = joinRelativePath(parentRelativePath(item.relativePath), nameValidation.itemName);
       await supabase.storage.from('setores').move(item.relativePath, newPath);
       sendJson(response, 200, { ok: true });
@@ -1270,6 +1323,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const item = getExplorerPath(sectorId, filePath);
 
     if (!item) {
+      console.warn(`[handleFoldersApi DELETE file] Item not found for path: ${filePath}`);
       sendJson(response, 404, { message: "Arquivo nao encontrado." });
       return;
     }
@@ -1277,6 +1331,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     if (supabase) {
       await supabase.storage.from('setores').remove([item.relativePath]);
       sendJson(response, 200, { ok: true });
+      console.log(`[handleFoldersApi DELETE file] Supabase: Removed '${item.relativePath}'`);
       return;
     }
 
@@ -1420,6 +1475,7 @@ async function handlePublicFoldersApi(request, response, pathname, searchParams)
     const result = await listExplorerItems(sectorId, currentPath);
 
     if (!result) {
+      console.warn(`[handlePublicFoldersApi GET explorer] listExplorerItems returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
       return;
     }
@@ -1449,6 +1505,7 @@ async function serveStatic(request, response, pathname) {
   const cleanPath = appShellRoutes.has(pathname) ? "/index.html" : pathname;
   const extension = path.extname(cleanPath).toLowerCase();
 
+  console.log(`[serveStatic] Serving static file: ${cleanPath}, extension: ${extension}`);
   if (!mimeTypes[extension]) {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     response.end("Arquivo não encontrado.");
@@ -1474,6 +1531,7 @@ async function serveStatic(request, response, pathname) {
     response.end(content);
   } catch (error) {
     if (error.code === "ENOENT") {
+      console.warn(`[serveStatic] File not found: ${filePath}`);
       response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       response.end("Arquivo não encontrado.");
       return;
@@ -1484,6 +1542,10 @@ async function serveStatic(request, response, pathname) {
 }
 
 async function handleRequest(request, response) {
+  console.log(`[handleRequest] Invoked for URL: ${request.url}`);
+  console.log(`[handleRequest] isServerless: ${isServerless}`);
+  console.log(`[handleRequest] Supabase client initialized: ${!!supabase}`);
+  console.log(`[handleRequest] Current sectors (before readSectors):`, Array.from(sectors));
   // Usa um fallback para o host para evitar erros de construção de URL no Vercel
   const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
@@ -1491,6 +1553,7 @@ async function handleRequest(request, response) {
     // Garantir sincronização de cache em ambiente Serverless
     if (isServerless) {
       await readSectors();
+      console.log(`[handleRequest] Current sectors (after readSectors):`, Array.from(sectors));
     }
 
     if (request.method === "OPTIONS") {
@@ -1527,6 +1590,7 @@ async function handleRequest(request, response) {
     await serveStatic(request, response, pathname);
   } catch (error) {
     console.error(error);
+    console.error(`[handleRequest] Error details: ${error.stack}`);
     const statusCode = error.code === 'ENOENT' ? 404 : 500;
     const message = statusCode === 404 ? "Recurso não encontrado" : "Erro interno do servidor.";
     sendJson(response, statusCode, { 
@@ -1537,6 +1601,7 @@ async function handleRequest(request, response) {
 }
 
 async function start() {
+  console.log("[start] Initializing server...");
   // Validação de ambiente crítica
   if (isServerless && !supabaseUrl) {
     console.warn("Aviso: SUPABASE_URL não configurada. O sistema funcionará apenas em modo leitura estática.");
@@ -1554,6 +1619,7 @@ async function start() {
   const host = isServerless ? undefined : "0.0.0.0";
 
   server.listen(port, host, () => {
+    console.log(`[start] Server listening on port ${port}`);
     console.log(`Servidor iniciado na porta ${port}`);
     if (supabase) console.log("Conectado ao Supabase Storage/Database.");
   });

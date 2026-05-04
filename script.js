@@ -1017,7 +1017,7 @@ async function apiRequest(url, options = {}) {
 
   if (!response.ok) {
     console.error(`Erro API (${response.status}):`, data);
-    throw new Error(data.message || "Não foi possível concluir a operação.");
+    throw new Error(data.message || `Erro ${response.status}: Não foi possível concluir a operação.`);
   }
 
   return data;
