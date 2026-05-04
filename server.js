@@ -593,8 +593,7 @@ async function listExplorerItems(sectorId, relativePath = "") {
   }
 
   if (supabase) {
-    const folderPath = current.relativePath;
-    const { data, error } = await supabase.storage.from('setores').list(folderPath);
+    const { data, error } = await supabase.storage.from('setores').list(current.storagePath);
     
     if (error) throw error;
 
