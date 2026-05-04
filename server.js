@@ -30,6 +30,24 @@ if (supabaseUrl && supabaseKey) {
   }
 }
 
+const defaultUsersData = [
+  {
+    id: 1,
+    nome: "Administrador",
+    usuario: "admin",
+    senha: "admin123",
+    perfil: "administrador",
+    ativo: true
+  },
+  {
+    id: 2,
+    nome: "T.I",
+    usuario: "ti",
+    senha: "ti123",
+    perfil: "administrador",
+    ativo: true
+  }
+];
 const defaultSectors = [
   { id: "departamento-pessoal", name: "Departamento Pessoal" },
   { id: "contabil", name: "Cont\u00e1bil" },
@@ -181,7 +199,31 @@ async function readUsers() {
     }
   }
 
-  const data = await readJson(path.join(rootDir, "usuarios.json"), { usuarios: [] });
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from('usuarios').select('*');
+      if (!error && data && data.length > 0) {
+        return data.map(normalizeUser);
+      } else if (!error && data && data.length === 0) {
+        console.log("Tabela 'usuarios' do Supabase vazia. Populando com usuários padrão.");
+        const usersToUpsert = defaultUsersData.map(user => ({
+          ...user,
+          senha: hashPassword(user.senha) // Hash the password before upsert
+        }));
+        const { error: upsertError } = await supabase.from('usuarios').upsert(usersToUpsert);
+        if (upsertError) {
+          console.error("Erro ao popular usuários padrão no Supabase:", upsertError.message);
+        }
+        return usersToUpsert.map(normalizeUser); // Return the newly inserted users
+      }
+    } catch (e) {
+      console.error("Erro ao buscar ou popular usuários no Supabase:", e.message);
+      // Fallback to hashed default users if Supabase call fails
+      return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+    }
+  }
+
+  const data = await readJson(path.join(rootDir, "usuarios.json"), { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) });
   const rawUsers = Array.isArray(data.usuarios) ? data.usuarios : [];
   const users = rawUsers.map(normalizeUser);
   const needsRewrite = users.length !== data.usuarios?.length || rawUsers.some((user, index) => {
@@ -197,8 +239,15 @@ async function readUsers() {
 
 async function writeUsers(users) {
   if (supabase) {
-    // Upsert sincroniza os dados baseados na Primary Key (id)
-    await supabase.from('usuarios').upsert(users.map(normalizeUser));
+    // Hash passwords before upserting to Supabase
+    const usersToUpsert = users.map(user => {
+      const normalized = normalizeUser(user);
+      return {
+        ...normalized,
+        senha: hashPassword(normalized.senha) // Ensure password is hashed
+      };
+    });
+    await supabase.from('usuarios').upsert(usersToUpsert);
     return;
   }
   await writeJson(path.join(rootDir, "usuarios.json"), { usuarios: users.map(normalizeUser) });
