@@ -554,17 +554,25 @@ function getExplorerPath(sectorId, relativePath = "") {
 
   // In serverless, absolutePath is not meaningful for Supabase Storage
   // We only care about relativePath for Supabase Storage operations
-  const resolvedRoot = path.resolve(sectorRoot);
-  const resolvedItem = path.resolve(sectorRoot, normalized.relativePath);
-  const isInsideRoot = resolvedItem === resolvedRoot || resolvedItem.startsWith(`${resolvedRoot}${path.sep}`);
+  // No ambiente Vercel/Supabase, ignoramos a validação de caminho físico no disco
+  // para evitar 404, já que o disco é somente-leitura e as pastas dinâmicas não existem.
+  if (!isServerless) {
+    const resolvedRoot = path.resolve(sectorRoot);
+    const resolvedItem = path.resolve(sectorRoot, normalized.relativePath);
+    const isInsideRoot = resolvedItem === resolvedRoot || resolvedItem.startsWith(`${resolvedRoot}${path.sep}`);
 
-  if (!isInsideRoot) {
-    return null;
+    if (!isInsideRoot) {
+      return null;
+    }
   }
 
+  // Isolamos os arquivos de cada setor em pastas virtuais no bucket do Supabase
+  const storagePath = [sectorId, normalized.relativePath].filter(Boolean).join("/");
+
   return {
-    absolutePath: resolvedItem,
-    relativePath: normalized.relativePath
+    absolutePath: path.join(sectorRoot, normalized.relativePath),
+    relativePath: normalized.relativePath,
+    storagePath: storagePath
   };
 }
 
@@ -597,7 +605,7 @@ async function listExplorerItems(sectorId, relativePath = "") {
         id: joinRelativePath(current.relativePath, item.name),
         nome: item.name,
         tipo: item.id ? "file" : "folder",
-        caminho: joinRelativePath(current.relativePath, item.name),
+        caminho: joinRelativePath(current.relativePath, item.name), // Path relativo ao setor para o UI
         tamanho: item.metadata?.size || null,
         atualizadoEm: item.updated_at || item.created_at,
         criadoEm: item.created_at
@@ -659,15 +667,13 @@ async function sendExplorerDownload(response, sectorId, filePath) {
   const item = getExplorerPath(sectorId, filePath);
 
   if (!item) {
-    console.warn(`[sendExplorerDownload] getExplorerPath returned null for sectorId: ${sectorId}, path: ${filePath}`);
     sendJson(response, 404, { message: "Arquivo nao encontrado." });
     return;
   }
 
   if (supabase) {
-    const { data, error } = await supabase.storage.from('setores').download(item.relativePath);
+    const { data, error } = await supabase.storage.from('setores').download(item.storagePath);
     if (error) {
-      console.error(`[sendExplorerDownload] Supabase error downloading '${item.relativePath}':`, error.message);
       sendJson(response, 404, { message: "Arquivo não encontrado no Storage." });
       return;
     }
@@ -712,7 +718,6 @@ async function sendExplorerPreview(response, sectorId, filePath) {
   const item = getExplorerPath(sectorId, filePath);
 
   if (!item) {
-    console.warn(`[sendExplorerPreview] getExplorerPath returned null for sectorId: ${sectorId}, path: ${filePath}`);
     sendJson(response, 404, { message: "Arquivo nao encontrado." });
     return;
   }
@@ -720,9 +725,8 @@ async function sendExplorerPreview(response, sectorId, filePath) {
   const extension = path.extname(item.absolutePath).toLowerCase();
 
   if (supabase) {
-    const { data, error } = await supabase.storage.from('setores').download(item.relativePath);
+    const { data, error } = await supabase.storage.from('setores').download(item.storagePath);
     if (error) {
-      console.error(`[sendExplorerPreview] Supabase error downloading for preview '${item.relativePath}':`, error.message);
       sendJson(response, 404, { message: "Arquivo não encontrado." });
       return;
     }
@@ -1188,7 +1192,6 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const current = getExplorerPath(sectorId, currentPath);
 
     if (!current) {
-      console.warn(`[handleFoldersApi POST explorer] getExplorerPath returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
       return;
     }
@@ -1203,10 +1206,17 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (supabase) {
-      const fullPath = joinRelativePath(current.relativePath, nameValidation.itemName);
-      const fileExtension = path.extname(fullPath).toLowerCase();
+      const storagePath = joinRelativePath(current.storagePath, nameValidation.itemName);
+      const fileExtension = path.extname(storagePath).toLowerCase();
       const contentType = mimeTypes[fileExtension] || "application/octet-stream";
-      await supabase.storage.from('setores').upload(fullPath, upload.content, { contentType });
+      
+      const { error } = await supabase.storage.from('setores').upload(storagePath, upload.content, { 
+        contentType,
+        upsert: true 
+      });
+
+      if (error) throw error;
+
       sendJson(response, 201, { ok: true });
       return;
     }
