@@ -1094,6 +1094,12 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
   if (explorerMatch && request.method === "GET") {
     const sectorId = decodeURIComponent(explorerMatch[1]);
+
+    // Garante que o cache de setores esteja populado se o ID não for encontrado (Serverless)
+    if (!sectors.has(sectorId)) {
+      await readSectors();
+    }
+
     const currentPath = searchParams.get("path") || "";
     const result = await listExplorerItems(sectorId, currentPath);
 
