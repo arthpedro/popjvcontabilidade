@@ -458,6 +458,10 @@ async function ensureSectorRoots() {
 
 function getSectorRoot(sectorId) {
   console.log(`[getSectorRoot] Checking for sectorId: ${sectorId}. Current sectors in cache:`, Array.from(sectors));
+  if (!(sectors instanceof Set)) {
+    console.error(`[getSectorRoot] 'sectors' is not a Set. Re-initializing defensively.`);
+    sectors = new Set(defaultSectors.map(s => s.id)); // Defensive re-initialization
+  }
   if (!sectors.has(sectorId)) {
     return null;
   }
@@ -1481,6 +1485,13 @@ async function handlePublicFoldersApi(request, response, pathname, searchParams)
 
   if (explorerMatch && request.method === "GET") {
     const sectorId = decodeURIComponent(explorerMatch[1]);
+    console.log(`[handlePublicFoldersApi] Explorer GET for sectorId: ${sectorId}`);
+    console.log(`[handlePublicFoldersApi] sectors.has(${sectorId}) before readSectors: ${sectors.has(sectorId)}`);
+
+    // Garante que o cache de setores esteja populado se o ID não for encontrado (Serverless)
+    if (!sectors.has(sectorId)) {
+      await readSectors();
+    }
     const currentPath = searchParams.get("path") || "";
     const result = await listExplorerItems(sectorId, currentPath);
 
