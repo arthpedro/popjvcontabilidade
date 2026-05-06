@@ -7,3 +7,4 @@ node_modules/
 # Arquivos temporários e logs
 *.tmp
 npm-debug.log*
+dados/logs.json

@@ -213,7 +213,10 @@ let currentPreviewUrl = "";
 let _lastFocusedElementForModal = null;
 let _loginTrapHandler = null;
 let cachedUsers = [];
+let cachedLogs = [];
 let currentExplorerItems = [];
+let explorerSearchTimer = null;
+let explorerSearchRequestId = 0;
 
 // --- Utilities ---
 function escapeHtml(value) {
@@ -307,6 +310,13 @@ function getStaffActionIconSvg(type) {
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
           <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.5"/>
           <path d="M8 8h.01M12 8h.01M16 8h.01M8 12h.01M12 12h.01M16 12h.01M8 16h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`;
+    case "logs":
+      return `
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+          <path d="M6 3h9l3 3v15H6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M14 3v4h4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M9 11h6M9 15h6M9 19h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>`;
     default:
       return "";
@@ -405,22 +415,26 @@ function renderExplorerToolbar({ editable = false } = {}) {
               </div>` : "";
 
   return `
-            <div class="explorer-toolbar">
-              <div class="explorer-nav-buttons">
-                <button class="icon-button" type="button" aria-label="Voltar" title="Voltar" data-explorer-back disabled>&lt;</button>
-                <button class="icon-button" type="button" aria-label="Avancar" title="Avancar" data-explorer-forward disabled>&gt;</button>
-                <button class="icon-button" type="button" aria-label="Subir uma pasta" title="Subir uma pasta" data-explorer-up disabled>^</button>
-              </div>
+            <div class="explorer-toolbar${editable ? " explorer-toolbar-editable" : ""}">
+              <div class="explorer-toolbar-main">
+                <div class="explorer-nav-buttons" aria-label="Navegação do explorador">
+                  <button class="icon-button" type="button" aria-label="Voltar" title="Voltar" data-explorer-back disabled>&lt;</button>
+                  <button class="icon-button" type="button" aria-label="Avancar" title="Avancar" data-explorer-forward disabled>&gt;</button>
+                  <button class="icon-button" type="button" aria-label="Subir uma pasta" title="Subir uma pasta" data-explorer-up disabled>^</button>
+                </div>
 
-              <div class="explorer-address" data-explorer-address>Selecione um setor</div>
-              <label class="explorer-search">
-                <span class="sr-only">Buscar arquivos e pastas</span>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-                  <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/>
-                  <path d="M20 20l-3.4-3.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                </svg>
-                <input type="search" placeholder="Buscar na pasta atual" autocomplete="off" data-explorer-search disabled>
-              </label>
+                <div class="explorer-path-tools">
+                  <div class="explorer-address" data-explorer-address>Selecione um setor</div>
+                  <label class="explorer-search">
+                    <span class="sr-only">Buscar arquivos e pastas no setor</span>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+                      <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/>
+                      <path d="M20 20l-3.4-3.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    </svg>
+                    <input type="search" placeholder="Buscar em todo o setor" autocomplete="off" data-explorer-search disabled>
+                  </label>
+                </div>
+              </div>
 ${actions}
             </div>`;
 }
@@ -496,6 +510,11 @@ function renderStaffPage() {
             <button class="staff-action-button" type="button" data-sectors-page>
               <span class="staff-action-icon" aria-hidden="true">${getStaffActionIconSvg("sectors")}</span>
               <span>Setores</span>
+            </button>
+
+            <button class="staff-action-button" type="button" data-logs-open>
+              <span class="staff-action-icon" aria-hidden="true">${getStaffActionIconSvg("logs")}</span>
+              <span>Log</span>
             </button>
           </div>
         </section>`;
@@ -886,6 +905,77 @@ function ensureUsersModalExists() {
   document.body.append(modal);
 }
 
+function ensureLogsModalExists() {
+  if (getCurrentPage() !== "staff" || document.querySelector("[data-logs-modal]")) {
+    return;
+  }
+
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.setAttribute("data-logs-modal", "");
+  modal.setAttribute("aria-hidden", "true");
+  modal.innerHTML = `
+    <div class="modal-backdrop" data-close-logs></div>
+    <div class="modal-dialog logs-dialog" role="dialog" aria-modal="true" aria-labelledby="logs-title">
+      <button class="modal-close" type="button" aria-label="Fechar log" data-close-logs>&times;</button>
+
+      <div class="logs-heading">
+        <div class="users-title-block">
+          <span>STAFF</span>
+          <h2 id="logs-title">Log</h2>
+        </div>
+        <button class="secondary-button" type="button" data-logs-refresh>Atualizar</button>
+      </div>
+
+      <div class="logs-body">
+        <div class="logs-summary" aria-label="Resumo do log">
+          <div class="logs-stat">
+            <strong data-logs-count>0</strong>
+            <span>Registros</span>
+          </div>
+          <div class="logs-stat">
+            <strong data-logs-success-count>0</strong>
+            <span>OK</span>
+          </div>
+          <div class="logs-stat">
+            <strong data-logs-failure-count>0</strong>
+            <span>Falhas</span>
+          </div>
+        </div>
+
+        <div class="logs-toolbar">
+          <label class="logs-search">
+            <span class="sr-only">Buscar no log</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+              <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M20 20l-3.4-3.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+            <input type="search" data-logs-search placeholder="Buscar por usuário, ação ou arquivo" autocomplete="off">
+          </label>
+        </div>
+
+        <p class="logs-notice" data-logs-notice role="status"></p>
+
+        <div class="logs-table-wrap">
+          <table class="logs-table">
+            <thead>
+              <tr>
+                <th>Quando</th>
+                <th>Usuário</th>
+                <th>Ação</th>
+                <th>Status</th>
+                <th>Registro</th>
+              </tr>
+            </thead>
+            <tbody data-logs-list></tbody>
+          </table>
+        </div>
+      </div>
+    </div>`;
+
+  document.body.append(modal);
+}
+
 setCurrentPageMetadata();
 renderPageContent();
 renderSidebar();
@@ -894,12 +984,16 @@ initThemeToggle();
 renderExplorerSectors();
 ensureLoginModalExists();
 ensureUsersModalExists();
+ensureLogsModalExists();
 
 const renameButton = document.querySelector("[data-rename-button]");
 const fileInput = document.querySelector("[data-file-input]");
 const usersOpenButton = document.querySelector("[data-users-open]");
+const logsOpenButton = document.querySelector("[data-logs-open]");
 const usersModal = document.querySelector("[data-users-modal]");
+const logsModal = document.querySelector("[data-logs-modal]");
 const closeUsersButtons = document.querySelectorAll("[data-close-users]");
+const closeLogsButtons = document.querySelectorAll("[data-close-logs]");
 const userNewButton = document.querySelector("[data-user-new]");
 const usersList = document.querySelector("[data-users-list]");
 const usersCount = document.querySelector("[data-users-count]");
@@ -918,6 +1012,13 @@ const formProfileInput = document.querySelector("[data-form-profile]");
 const formActiveInput = document.querySelector("[data-form-active]");
 const userMessage = document.querySelector("[data-user-message]");
 const userCancelButton = document.querySelector("[data-user-cancel]");
+const logsList = document.querySelector("[data-logs-list]");
+const logsSearchInput = document.querySelector("[data-logs-search]");
+const logsNotice = document.querySelector("[data-logs-notice]");
+const logsRefreshButton = document.querySelector("[data-logs-refresh]");
+const logsCount = document.querySelector("[data-logs-count]");
+const logsSuccessCount = document.querySelector("[data-logs-success-count]");
+const logsFailureCount = document.querySelector("[data-logs-failure-count]");
 const isProtectedPage = ["staff", "setores"].includes(document.body.dataset.page);
 const isReadOnlyExplorer = getCurrentPage() === "arquivos";
 // header / login related elements (may be absent on some pages)
@@ -1096,6 +1197,14 @@ async function removeUser(userId) {
   });
 }
 
+async function getAuditLogs() {
+  const data = await apiRequest("/api/logs", {
+    headers: getSessionUserHeader()
+  });
+
+  return Array.isArray(data.logs) ? data.logs : [];
+}
+
 async function getSectors({ publicAccess = getCurrentPage() !== "setores" } = {}) {
   const data = await apiRequest(publicAccess ? "/api/public/setores" : "/api/setores", {
     headers: publicAccess ? {} : getSessionUserHeader()
@@ -1134,6 +1243,18 @@ async function getSectorFolders(sectorId) {
   return {
     caminho: data.caminho || "",
     pai: data.pai || "",
+    itens: Array.isArray(data.itens) ? data.itens : []
+  };
+}
+
+async function searchSectorItems(sectorId, query) {
+  const basePath = getSectorApiPath();
+  const data = await apiRequest(`${basePath}/${encodeURIComponent(sectorId)}/search?q=${encodeURIComponent(query)}`, {
+    headers: getSessionUserHeader()
+  });
+
+  return {
+    busca: data.busca || query,
     itens: Array.isArray(data.itens) ? data.itens : []
   };
 }
@@ -1820,6 +1941,201 @@ async function renderUsers() {
   }
 }
 
+function clearLogsNotice() {
+  setMessage(logsNotice);
+}
+
+function showLogsNotice(message, type = "success") {
+  setMessage(logsNotice, message, { error: type === "error" });
+}
+
+function getLogActorLabel(log) {
+  const actor = log.actor || {};
+  return actor.nome || actor.usuario || "Público";
+}
+
+function getLogActionLabel(action) {
+  const labels = {
+    "auth.login": "Login",
+    "auth.admin_denied": "Acesso bloqueado",
+    "logs.view": "Visualizou log",
+    "users.list": "Listou usuários",
+    "users.create": "Criou usuário",
+    "users.update": "Atualizou usuário",
+    "users.delete": "Excluiu usuário",
+    "sectors.list": "Listou setores",
+    "sectors.create": "Criou setor",
+    "sectors.delete": "Excluiu setor",
+    "explorer.list": "Abriu pasta",
+    "folders.create": "Criou pasta",
+    "folders.create_legacy": "Criou pasta",
+    "folders.list_legacy": "Listou pastas",
+    "folders.delete_legacy": "Excluiu pasta",
+    "files.prepare_upload": "Preparou upload",
+    "files.upload": "Enviou arquivo",
+    "files.download": "Baixou arquivo",
+    "files.preview": "Visualizou arquivo",
+    "files.delete": "Excluiu arquivo",
+    "items.rename": "Renomeou item",
+    "public.sectors.list": "Listou setores públicos",
+    request: "Requisição"
+  };
+
+  return labels[action] || action || "Registro";
+}
+
+function getLogStatusLabel(log) {
+  if (log.status === "blocked") return "Bloqueado";
+  if (log.status === "failure") return "Falha";
+  return "OK";
+}
+
+function getLogDetailsText(log) {
+  const details = log.details || {};
+  const payload = details.payload || {};
+  const parts = [];
+
+  if (details.sectorId) parts.push(`Setor: ${details.sectorId}`);
+  if (details.itemPath) parts.push(`Caminho: ${details.itemPath}`);
+  if (details.userId) parts.push(`Usuário ID: ${details.userId}`);
+  if (payload.nome) parts.push(`Nome: ${payload.nome}`);
+  if (payload.usuario) parts.push(`Login: ${payload.usuario}`);
+  if (payload.filename) parts.push(`Arquivo: ${payload.filename}`);
+  if (details.error) parts.push(`Erro: ${details.error}`);
+
+  return parts.join(" | ") || log.path || "-";
+}
+
+function updateLogsSummary(logs) {
+  const success = logs.filter((log) => log.status === "success").length;
+  const failures = logs.length - success;
+
+  if (logsCount) logsCount.textContent = String(logs.length);
+  if (logsSuccessCount) logsSuccessCount.textContent = String(success);
+  if (logsFailureCount) logsFailureCount.textContent = String(failures);
+}
+
+function renderLogsEmpty(message) {
+  if (!logsList) return;
+
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+
+  cell.colSpan = 5;
+  cell.className = "logs-empty";
+  cell.textContent = message;
+  row.append(cell);
+  logsList.append(row);
+}
+
+function renderLogRow(log) {
+  const row = document.createElement("tr");
+  const dateCell = createTableCell(formatDate(log.createdAt) || "-");
+  const actorCell = document.createElement("td");
+  const actor = document.createElement("div");
+  const actorName = document.createElement("strong");
+  const actorLogin = document.createElement("small");
+  const actionCell = createTableCell(getLogActionLabel(log.action));
+  const statusCell = document.createElement("td");
+  const status = document.createElement("span");
+  const detailsCell = document.createElement("td");
+  const details = document.createElement("span");
+
+  actor.className = "log-actor";
+  actorName.textContent = getLogActorLabel(log);
+  actorLogin.textContent = log.actor?.usuario || "";
+  actor.append(actorName, actorLogin);
+  actorCell.append(actor);
+
+  status.className = `log-status ${log.status || "success"}`;
+  status.textContent = getLogStatusLabel(log);
+  statusCell.append(status);
+
+  details.className = "log-details";
+  details.textContent = getLogDetailsText(log);
+  details.title = details.textContent;
+  detailsCell.append(details);
+
+  row.append(dateCell, actorCell, actionCell, statusCell, detailsCell);
+  return row;
+}
+
+function renderLogsList(logs = cachedLogs) {
+  if (!logsList) return;
+
+  const searchTerm = normalizeSearchText(logsSearchInput?.value);
+  const visibleLogs = searchTerm
+    ? logs.filter((log) => {
+      return normalizeSearchText([
+        formatDate(log.createdAt),
+        getLogActorLabel(log),
+        log.actor?.usuario,
+        getLogActionLabel(log.action),
+        getLogStatusLabel(log),
+        log.path,
+        getLogDetailsText(log)
+      ].join(" ")).includes(searchTerm);
+    })
+    : logs;
+
+  logsList.innerHTML = "";
+
+  if (logs.length === 0) {
+    renderLogsEmpty("Nenhum registro encontrado.");
+    return;
+  }
+
+  if (visibleLogs.length === 0) {
+    renderLogsEmpty("Nenhum registro corresponde à busca.");
+    return;
+  }
+
+  visibleLogs.forEach((log) => logsList.append(renderLogRow(log)));
+}
+
+async function renderLogs() {
+  if (!logsList) return [];
+
+  try {
+    const logs = await getAuditLogs();
+    cachedLogs = logs;
+    updateLogsSummary(logs);
+    renderLogsList(logs);
+    return logs;
+  } catch (error) {
+    showLogsNotice(error.message || "Não foi possível carregar o log.", "error");
+    return [];
+  }
+}
+
+async function openLogsModal() {
+  if (!logsModal) return;
+
+  setModalOpen(logsModal, true);
+  clearLogsNotice();
+
+  if (logsSearchInput) {
+    logsSearchInput.value = "";
+  }
+
+  await renderLogs();
+
+  if (logsSearchInput) {
+    logsSearchInput.focus();
+  }
+}
+
+function closeLogsModal() {
+  if (!logsModal) return;
+
+  setModalOpen(logsModal, false);
+  clearLogsNotice();
+
+  if (logsOpenButton) {
+    logsOpenButton.focus();
+  }
+}
+
 async function openUsersModal() {
   if (!usersModal) {
     return;
@@ -2174,6 +2490,7 @@ function createExplorerRow(item) {
   const nameWrap = document.createElement("div");
   const nameGroup = document.createElement("div");
   const icon = document.createElement("span");
+  const nameText = document.createElement("span");
   const name = document.createElement("span");
   const typeCell = document.createElement("td");
   const sizeCell = document.createElement("td");
@@ -2185,6 +2502,7 @@ function createExplorerRow(item) {
   row.dataset.itemName = item.nome;
   nameWrap.className = "explorer-name-cell";
   nameGroup.className = "explorer-name-group";
+  nameText.className = "explorer-name-text";
   const extension = getFileExtension(item.nome);
   const fileIconClass = extension === ".pdf" ? " pdf-icon" : [".doc", ".docx"].includes(extension) ? " word-icon" : "";
   icon.className = `explorer-file-icon${fileIconClass}`;
@@ -2203,11 +2521,21 @@ function createExplorerRow(item) {
   }
 
   name.textContent = item.nome;
+  nameText.append(name);
+
+  if (getExplorerSearchTerm() && item.caminho && item.caminho !== item.nome) {
+    const pathHint = document.createElement("small");
+    const parentPath = item.caminho.split("/").slice(0, -1).join(" / ");
+    pathHint.className = "explorer-path-hint";
+    pathHint.textContent = parentPath ? `em ${parentPath}` : selectedSector?.name || "";
+    nameText.append(pathHint);
+  }
+
   typeCell.textContent = item.tipo === "folder" ? "Pasta" : "Arquivo";
   sizeCell.textContent = formatFileSize(item.tamanho);
   dateCell.textContent = formatDate(item.atualizadoEm);
 
-  nameGroup.append(icon, name);
+  nameGroup.append(icon, nameText);
   nameWrap.append(nameGroup);
 
   // add download button for files (visible in arquivos explorer)
@@ -2254,7 +2582,7 @@ function renderExplorerRows(items) {
     const searchTerm = explorerSearchInput?.value.trim();
     renderExplorerEmpty(
       searchTerm
-        ? `Nenhum arquivo ou pasta encontrado para "${searchTerm}".`
+        ? `Nenhum arquivo ou pasta encontrado no setor para "${searchTerm}".`
         : "Esta pasta está vazia."
     );
     return;
@@ -2264,30 +2592,82 @@ function renderExplorerRows(items) {
 }
 
 function clearExplorerSearch() {
+  explorerSearchRequestId += 1;
+
+  if (explorerSearchTimer) {
+    clearTimeout(explorerSearchTimer);
+    explorerSearchTimer = null;
+  }
+
   if (explorerSearchInput) {
     explorerSearchInput.value = "";
   }
 }
 
-function filterExplorerItems(items, searchValue) {
-  const searchTerm = normalizeSearchText(searchValue);
-
-  if (!searchTerm) {
-    return items;
-  }
-
-  return items.filter((item) => {
-    const typeLabel = item.tipo === "folder" ? "pasta" : "arquivo";
-    const searchableText = `${item.nome} ${item.caminho} ${typeLabel} ${getFileExtension(item.nome)}`;
-    return normalizeSearchText(searchableText).includes(searchTerm);
-  });
+function getExplorerSearchTerm() {
+  return explorerSearchInput?.value.trim() || "";
 }
 
-function renderFilteredExplorerRows() {
+function renderCurrentExplorerRows() {
   selectedExplorerItem = null;
   closeFileActionsDropdown();
-  renderExplorerRows(filterExplorerItems(currentExplorerItems, explorerSearchInput?.value));
+  renderExplorerRows(currentExplorerItems);
   updateExplorerControls();
+}
+
+async function renderExplorerSearchResults() {
+  if (!selectedSector) {
+    return;
+  }
+
+  const searchTerm = getExplorerSearchTerm();
+
+  if (!searchTerm) {
+    renderCurrentExplorerRows();
+    return;
+  }
+
+  const requestId = ++explorerSearchRequestId;
+  selectedExplorerItem = null;
+  closeFileActionsDropdown();
+  renderExplorerEmpty("Buscando em todo o setor...");
+  updateExplorerControls();
+
+  try {
+    const result = await searchSectorItems(selectedSector.id, searchTerm);
+
+    if (requestId !== explorerSearchRequestId || searchTerm !== getExplorerSearchTerm()) {
+      return;
+    }
+
+    renderExplorerRows(result.itens);
+    updateExplorerControls();
+  } catch (error) {
+    if (requestId !== explorerSearchRequestId) {
+      return;
+    }
+
+    showToast(error.message || "Não foi possível buscar no setor.", "error");
+    renderExplorerRows([]);
+    updateExplorerControls();
+  }
+}
+
+function scheduleExplorerSearch() {
+  if (explorerSearchTimer) {
+    clearTimeout(explorerSearchTimer);
+  }
+
+  if (!getExplorerSearchTerm()) {
+    explorerSearchRequestId += 1;
+    renderCurrentExplorerRows();
+    return;
+  }
+
+  explorerSearchTimer = setTimeout(() => {
+    explorerSearchTimer = null;
+    renderExplorerSearchResults();
+  }, 250);
 }
 
 async function loadExplorerPath(pathValue, { pushHistory = true } = {}) {
@@ -2316,7 +2696,11 @@ async function loadExplorerPath(pathValue, { pushHistory = true } = {}) {
     const result = await getSectorFolders(selectedSector.id);
     currentExplorerPath = result.caminho;
     currentExplorerItems = result.itens;
-    renderFilteredExplorerRows();
+    if (getExplorerSearchTerm()) {
+      await renderExplorerSearchResults();
+    } else {
+      renderCurrentExplorerRows();
+    }
     updateExplorerControls();
   } catch (error) {
     showToast(error.message || "Não foi possível carregar a pasta.", "error");
@@ -2791,8 +3175,8 @@ function initializeEventListeners() {
   on(sidebarElement, "click", handleSidebarSectorClick);
   on(folderList, "click", handleFolderListClick);
   on(folderList, "dblclick", handleFolderListDoubleClick);
-  on(explorerSearchInput, "input", renderFilteredExplorerRows);
-  on(explorerSearchInput, "search", renderFilteredExplorerRows);
+  on(explorerSearchInput, "input", scheduleExplorerSearch);
+  on(explorerSearchInput, "search", scheduleExplorerSearch);
   on(explorerBackButton, "click", goBackExplorer);
   on(explorerForwardButton, "click", goForwardExplorer);
   on(explorerUpButton, "click", goUpExplorer);
@@ -2802,14 +3186,18 @@ function initializeEventListeners() {
   on(fileInput, "change", handleUploadFiles);
 
   on(usersOpenButton, "click", openUsersModal);
+  on(logsOpenButton, "click", openLogsModal);
+  on(logsRefreshButton, "click", renderLogs);
   on(userNewButton, "click", openNewUserForm);
   on(userForm, "submit", handleUserFormSubmit);
   on(userCancelButton, "click", resetUserForm);
   on(usersList, "click", handleUsersListClick);
   on(usersSearchInput, "input", () => renderUsersList());
+  on(logsSearchInput, "input", () => renderLogsList());
 
   document.querySelectorAll("[data-close-login]").forEach(btn => on(btn, "click", closeLoginModal));
   closeUsersButtons.forEach(btn => on(btn, "click", closeUsersModal));
+  closeLogsButtons.forEach(btn => on(btn, "click", closeLogsModal));
 
   document.addEventListener("keydown", handleGlobalKeyDown);
 }
@@ -2821,6 +3209,10 @@ function handleGlobalKeyDown(event) {
 
   if (event.key === "Escape" && usersModal && usersModal.classList.contains("is-open")) {
     closeUsersModal();
+  }
+
+  if (event.key === "Escape" && logsModal && logsModal.classList.contains("is-open")) {
+    closeLogsModal();
   }
 
   const previewModal = document.querySelector("[data-preview-modal]");

@@ -129,6 +129,8 @@ const defaultSectors = [
 ];
 const usersConfigStoragePath = "_config/usuarios.json";
 const sectorsConfigStoragePath = "_config/setores.json";
+const auditLogsStoragePath = "_config/logs.json";
+const auditLogsFilePath = path.join(dataDir, "logs.json");
 
 let sectors = new Set(defaultSectors.map((sector) => sector.id));
 
@@ -195,6 +197,29 @@ function publicUser(user) {
     usuario: user.usuario,
     perfil: user.perfil,
     ativo: user.ativo
+  };
+}
+
+function publicAuditActor(user) {
+  if (!user) {
+    return {
+      id: null,
+      nome: "Público",
+      usuario: "publico",
+      perfil: "publico"
+    };
+  }
+
+  const rawProfile = String(user.perfil || user.permissao || "").trim();
+  const profile = ["publico", "desconhecido"].includes(rawProfile)
+    ? rawProfile
+    : resolveUserProfile(user);
+
+  return {
+    id: Number(user.id) || null,
+    nome: String(user.nome || user.usuario || "Usuário").trim(),
+    usuario: String(user.usuario || "").trim(),
+    perfil: profile
   };
 }
 
@@ -595,6 +620,277 @@ async function writeSectors(sectorList) {
   return normalizedSectors;
 }
 
+function sanitizeAuditValue(value, key = "") {
+  const normalizedKey = String(key || "").toLowerCase();
+
+  if (/(senha|password|token|secret|service_role|anon_key|key|authorization|uploadurl|signedurl|content)/.test(normalizedKey)) {
+    return "[redacted]";
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return `[buffer:${value.length}]`;
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => sanitizeAuditValue(item, key));
+  }
+
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, itemValue]) => typeof itemValue !== "function")
+        .map(([itemKey, itemValue]) => [itemKey, sanitizeAuditValue(itemValue, itemKey)])
+    );
+  }
+
+  if (typeof value === "string" && value.length > 500) {
+    return `${value.slice(0, 500)}...`;
+  }
+
+  return value;
+}
+
+function normalizeAuditLogEntry(entry) {
+  return {
+    id: String(entry?.id || crypto.randomUUID()),
+    createdAt: String(entry?.createdAt || new Date().toISOString()),
+    status: String(entry?.status || "success"),
+    statusCode: Number(entry?.statusCode) || 200,
+    action: String(entry?.action || "request"),
+    method: String(entry?.method || ""),
+    path: String(entry?.path || ""),
+    resource: String(entry?.resource || ""),
+    actor: publicAuditActor(entry?.actor),
+    details: sanitizeAuditValue(entry?.details || {}),
+    ip: String(entry?.ip || ""),
+    userAgent: String(entry?.userAgent || "")
+  };
+}
+
+async function readAuditLogsFromStorage() {
+  if (!supabase) {
+    return [];
+  }
+
+  try {
+    const { data, error } = await supabase.storage.from('setores').download(auditLogsStoragePath);
+
+    if (error) {
+      logDebug("Log de auditoria no Storage nao encontrado:", error.message);
+      return [];
+    }
+
+    const text = Buffer.from(await data.arrayBuffer()).toString("utf8");
+    const parsed = JSON.parse(text);
+    const logs = Array.isArray(parsed?.logs) ? parsed.logs : [];
+    return logs.map(normalizeAuditLogEntry);
+  } catch (error) {
+    console.error("Erro ao ler log de auditoria:", error.message);
+    return [];
+  }
+}
+
+async function writeAuditLogsToStorage(logs) {
+  if (!supabase) {
+    throw new Error(getSupabaseConfigMessage());
+  }
+
+  const body = Buffer.from(JSON.stringify({ logs }, null, 2), "utf8");
+  const { error } = await supabase.storage.from('setores').upload(auditLogsStoragePath, body, {
+    contentType: "application/json; charset=utf-8",
+    upsert: true
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function readAuditLogs() {
+  if (supabase) {
+    return readAuditLogsFromStorage();
+  }
+
+  if (isServerless) {
+    return [];
+  }
+
+  const data = await readJson(auditLogsFilePath, { logs: [] });
+  return (Array.isArray(data.logs) ? data.logs : []).map(normalizeAuditLogEntry);
+}
+
+async function writeAuditLogs(logs) {
+  const normalizedLogs = logs.map(normalizeAuditLogEntry);
+
+  if (supabase) {
+    await writeAuditLogsToStorage(normalizedLogs);
+    return normalizedLogs;
+  }
+
+  if (isServerless) {
+    return normalizedLogs;
+  }
+
+  await writeJson(auditLogsFilePath, { logs: normalizedLogs });
+  return normalizedLogs;
+}
+
+function getClientIp(request) {
+  return String(
+    request.headers["x-forwarded-for"] ||
+    request.headers["x-real-ip"] ||
+    request.socket?.remoteAddress ||
+    ""
+  ).split(",")[0].trim();
+}
+
+async function resolveAuditActor(request) {
+  if (request.auditActor) {
+    return publicAuditActor(request.auditActor);
+  }
+
+  const userId = Number(request.headers["x-user-id"]);
+
+  if (userId) {
+    try {
+      const users = await readUsers();
+      const user = users.find((item) => Number(item.id) === userId);
+
+      if (user) {
+        return publicAuditActor(user);
+      }
+    } catch (error) {
+      logDebug("Nao foi possivel resolver usuario do log:", error.message);
+    }
+
+    return {
+      id: userId,
+      nome: `Usuário #${userId}`,
+      usuario: String(userId),
+      perfil: "desconhecido"
+    };
+  }
+
+  return publicAuditActor(null);
+}
+
+function getAuditStatus(statusCode) {
+  if (statusCode === 401 || statusCode === 403) {
+    return "blocked";
+  }
+
+  if (statusCode >= 400) {
+    return "failure";
+  }
+
+  return "success";
+}
+
+function inferAuditAction(method, pathname) {
+  if (pathname === "/api/login") return "auth.login";
+  if (pathname === "/api/logs") return "logs.view";
+  if (pathname === "/api/usuarios") return method === "POST" ? "users.create" : "users.list";
+  if (/^\/api\/usuarios\/\d+$/.test(pathname)) return method === "DELETE" ? "users.delete" : "users.update";
+  if (pathname === "/api/setores") return method === "POST" ? "sectors.create" : "sectors.list";
+  if (/^\/api\/setores\/[^/]+$/.test(pathname)) return method === "DELETE" ? "sectors.delete" : "sectors.view";
+  if (/\/explorer\/?$/.test(pathname)) return method === "POST" ? "folders.create" : "explorer.list";
+  if (/\/upload\/?$/.test(pathname)) return "files.upload";
+  if (/\/sign-upload\/?$/.test(pathname)) return "files.prepare_upload";
+  if (/\/rename\/?$/.test(pathname)) return "items.rename";
+  if (/\/delete\/?$/.test(pathname)) return "files.delete";
+  if (/\/download\/?$/.test(pathname)) return "files.download";
+  if (/\/preview\/?$/.test(pathname)) return "files.preview";
+  if (/\/search\/?$/.test(pathname)) return "explorer.search";
+  if (/\/pastas\/?$/.test(pathname)) return method === "POST" ? "folders.create_legacy" : "folders.list_legacy";
+  if (/\/pastas\/.+$/.test(pathname)) return "folders.delete_legacy";
+  if (pathname === "/api/public/setores") return "public.sectors.list";
+  return "request";
+}
+
+function getAuditResource(pathname) {
+  if (pathname.includes("/usuarios")) return "Usuários";
+  if (pathname.includes("/setores")) return "Setores";
+  if (pathname.includes("/logs")) return "Log";
+  if (pathname.includes("/login")) return "Autenticação";
+  return "API";
+}
+
+function getAuditRouteDetails(pathname, searchParams) {
+  const details = {};
+  const sectorMatch = pathname.match(/^\/api\/(?:public\/)?setores\/([^/]+)/);
+  const userMatch = pathname.match(/^\/api\/usuarios\/(\d+)/);
+  const queryPath = searchParams.get("path");
+  const querySearch = searchParams.get("q");
+
+  if (sectorMatch) {
+    details.sectorId = decodeURIComponent(sectorMatch[1]);
+  }
+
+  if (userMatch) {
+    details.userId = Number(userMatch[1]);
+  }
+
+  if (queryPath) {
+    details.itemPath = queryPath;
+  }
+
+  if (querySearch) {
+    details.search = querySearch;
+  }
+
+  return details;
+}
+
+async function appendAuditLog(request, { pathname, searchParams, statusCode }) {
+  try {
+    const actor = await resolveAuditActor(request);
+    const routeDetails = getAuditRouteDetails(pathname, searchParams);
+    const details = sanitizeAuditValue({
+      ...routeDetails,
+      ...(request.auditDetails || {}),
+      payload: request.auditPayload
+    });
+    const logs = await readAuditLogs();
+    const entry = normalizeAuditLogEntry({
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      status: request.auditStatus || getAuditStatus(statusCode),
+      statusCode,
+      action: request.auditAction || inferAuditAction(request.method, pathname),
+      method: request.method,
+      path: pathname,
+      resource: request.auditResource || getAuditResource(pathname),
+      actor,
+      details,
+      ip: getClientIp(request),
+      userAgent: request.headers["user-agent"] || ""
+    });
+
+    logs.push(entry);
+    await writeAuditLogs(logs);
+  } catch (error) {
+    console.error("Erro ao registrar log de auditoria:", error.message);
+  }
+}
+
+function attachAuditLogger(request, response, pathname, searchParams) {
+  if (!pathname.startsWith("/api/")) {
+    return;
+  }
+
+  response.once("finish", () => {
+    appendAuditLog(request, {
+      pathname,
+      searchParams,
+      statusCode: response.statusCode || 200
+    });
+  });
+}
+
 function nextUserId(users) {
   return users.reduce((highestId, user) => Math.max(highestId, Number(user.id) || 0), 0) + 1;
 }
@@ -627,7 +923,9 @@ async function readBody(request) {
   }
 
   try {
-    return JSON.parse(body);
+    const parsed = JSON.parse(body);
+    request.auditPayload = sanitizeAuditValue(parsed);
+    return parsed;
   } catch (parseError) {
     const error = new Error("JSON inválido.");
     error.statusCode = 400;
@@ -658,10 +956,17 @@ async function requireAdmin(request, response) {
   const user = users.find((item) => item.id === userId && item.ativo && userIsAdmin(item));
 
   if (!user) {
+    request.auditAction = request.auditAction || "auth.admin_denied";
+    request.auditResource = request.auditResource || "Autorização";
+    request.auditDetails = {
+      ...(request.auditDetails || {}),
+      userId: userId || null
+    };
     sendJson(response, 403, { message: "Acesso restrito a administradores." });
     return null;
   }
 
+  request.auditActor = user;
   return user;
 }
 
@@ -856,6 +1161,167 @@ function emptyExplorerResult(current) {
     caminho: current.relativePath,
     pai: parentRelativePath(current.relativePath),
     itens: []
+  };
+}
+
+function normalizeSearchValue(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function sortExplorerItems(items) {
+  return items.sort((a, b) => {
+    if (a.tipo !== b.tipo) {
+      return a.tipo === "folder" ? -1 : 1;
+    }
+
+    return a.caminho.localeCompare(b.caminho, "pt-BR");
+  });
+}
+
+function explorerItemMatchesSearch(item, query) {
+  const normalizedQuery = normalizeSearchValue(query);
+
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  const typeLabel = item.tipo === "folder" ? "pasta" : "arquivo";
+  const extension = path.extname(item.nome || "");
+  const searchableText = `${item.nome} ${item.caminho} ${typeLabel} ${extension}`;
+
+  return normalizeSearchValue(searchableText).includes(normalizedQuery);
+}
+
+async function listSupabaseExplorerItemsRecursive(sectorId, relativePath = "") {
+  const current = getExplorerPath(sectorId, relativePath);
+
+  if (!current) {
+    return null;
+  }
+
+  const { data, error } = await supabase.storage.from('setores').list(current.storagePath, {
+    limit: 1000,
+    sortBy: { column: 'name', order: 'asc' }
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const items = [];
+
+  for (const item of (data || []).filter((entry) => entry.name !== ".folder")) {
+    const itemPath = joinRelativePath(current.relativePath, item.name);
+    const itemType = item.id ? "file" : "folder";
+    const explorerItem = {
+      id: itemPath,
+      nome: item.name,
+      tipo: itemType,
+      caminho: itemPath,
+      tamanho: item.metadata?.size || null,
+      atualizadoEm: item.updated_at || item.created_at,
+      criadoEm: item.created_at
+    };
+
+    items.push(explorerItem);
+
+    if (itemType === "folder") {
+      const children = await listSupabaseExplorerItemsRecursive(sectorId, itemPath);
+
+      if (children) {
+        items.push(...children);
+      }
+    }
+  }
+
+  return items;
+}
+
+async function listLocalExplorerItemsRecursive(sectorId, relativePath = "") {
+  const current = getExplorerPath(sectorId, relativePath);
+
+  if (!current) {
+    return null;
+  }
+
+  let entries;
+
+  try {
+    const stat = await fs.stat(current.absolutePath);
+
+    if (!stat.isDirectory()) {
+      return null;
+    }
+
+    entries = await fs.readdir(current.absolutePath, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+
+    throw error;
+  }
+
+  const items = [];
+
+  for (const entry of entries) {
+    const itemPath = joinRelativePath(current.relativePath, entry.name);
+    const absolutePath = path.join(current.absolutePath, entry.name);
+    const stat = await fs.stat(absolutePath);
+    const itemType = entry.isDirectory() ? "folder" : "file";
+
+    items.push({
+      id: itemPath,
+      nome: entry.name,
+      tipo: itemType,
+      caminho: itemPath,
+      tamanho: itemType === "file" ? stat.size : null,
+      atualizadoEm: stat.mtime.toISOString(),
+      criadoEm: (stat.birthtime || stat.ctime).toISOString()
+    });
+
+    if (entry.isDirectory()) {
+      const children = await listLocalExplorerItemsRecursive(sectorId, itemPath);
+
+      if (children) {
+        items.push(...children);
+      }
+    }
+  }
+
+  return items;
+}
+
+async function searchExplorerItems(sectorId, query) {
+  const root = getExplorerPath(sectorId, "");
+
+  if (!root) {
+    return null;
+  }
+
+  const normalizedQuery = normalizeSearchValue(query);
+
+  if (!normalizedQuery) {
+    return emptyExplorerResult(root);
+  }
+
+  const allItems = supabase
+    ? await listSupabaseExplorerItemsRecursive(sectorId)
+    : await listLocalExplorerItemsRecursive(sectorId);
+
+  if (!allItems) {
+    return null;
+  }
+
+  return {
+    caminho: "",
+    pai: "",
+    busca: query,
+    itens: sortExplorerItems(allItems.filter((item) => explorerItemMatchesSearch(item, query)))
   };
 }
 
@@ -1134,9 +1600,12 @@ async function listSectorFolders(sectorId) {
 }
 
 async function handleLogin(request, response) {
+  request.auditAction = "auth.login";
+  request.auditResource = "Autenticação";
   const payload = await readBody(request);
   const usuario = String(payload.usuario || "").trim().toLowerCase();
   const senha = String(payload.senha || "");
+  request.auditDetails = { usuario };
   const users = await readUsers();
   const hashedPassword = hashPassword(senha);
 
@@ -1146,11 +1615,34 @@ async function handleLogin(request, response) {
   });
 
   if (!user) {
+    request.auditActor = { nome: usuario || "Tentativa sem usuário", usuario, perfil: "desconhecido" };
     sendJson(response, 401, { message: "Usuário ou senha inválidos." });
     return;
   }
 
+  request.auditActor = user;
   sendJson(response, 200, { usuario: publicUser(user) });
+}
+
+async function handleLogsApi(request, response, pathname) {
+  request.auditAction = "logs.view";
+  request.auditResource = "Log";
+
+  const admin = await requireAdmin(request, response);
+
+  if (!admin) {
+    return;
+  }
+
+  if (request.method === "GET" && (pathname === "/api/logs" || pathname === "/api/logs/")) {
+    const logs = await readAuditLogs();
+    const orderedLogs = logs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    sendJson(response, 200, { logs: orderedLogs });
+    return;
+  }
+
+  sendJson(response, 405, { message: "Método não permitido." });
 }
 
 async function handleUsersApi(request, response, pathname) {
@@ -1322,6 +1814,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
   const sectorsCollection = pathname === "/api/setores";
   const sectorMatch = pathname.match(/^\/api\/setores\/([^/]+)$/);
   const explorerMatch = pathname.match(/^\/api\/setores\/([^/]+)\/explorer$/);
+  const searchMatch = pathname.match(/^\/api\/setores\/([^/]+)\/search$/);
   const uploadMatch = pathname.match(/^\/api\/setores\/([^/]+)\/upload$/);
   const renameMatch = pathname.match(/^\/api\/setores\/([^/]+)\/rename$/);
   const deleteFileMatch = pathname.match(/^\/api\/setores\/([^/]+)\/delete$/);
@@ -1451,6 +1944,25 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     if (!result) {
       sendJson(response, 404, { message: "Pasta nao encontrada." });
+      return;
+    }
+
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (searchMatch && request.method === "GET") {
+    const sectorId = decodeURIComponent(searchMatch[1]);
+
+    if (!sectors.has(sectorId)) {
+      await readSectors();
+    }
+
+    const query = searchParams.get("q") || "";
+    const result = await searchExplorerItems(sectorId, query);
+
+    if (!result) {
+      sendJson(response, 404, { message: "Setor não encontrado." });
       return;
     }
 
@@ -1879,6 +2391,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 async function handlePublicFoldersApi(request, response, pathname, searchParams) {
   const sectorsCollection = pathname === "/api/public/setores" || pathname === "/api/public/setores/";
   const explorerMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/explorer\/?$/);
+  const searchMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/search\/?$/);
   const downloadMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/download\/?$/);
   const previewMatch = pathname.match(/^\/api\/public\/setores\/([^/]+)\/preview\/?$/);
 
@@ -1903,6 +2416,25 @@ async function handlePublicFoldersApi(request, response, pathname, searchParams)
     if (!result) {
       console.warn(`[handlePublicFoldersApi GET explorer] listExplorerItems returned null for sectorId: ${sectorId}, path: ${currentPath}`);
       sendJson(response, 404, { message: "Pasta nao encontrada." });
+      return;
+    }
+
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (searchMatch && request.method === "GET") {
+    const sectorId = decodeURIComponent(searchMatch[1]);
+
+    if (!sectors.has(sectorId)) {
+      await readSectors();
+    }
+
+    const query = searchParams.get("q") || "";
+    const result = await searchExplorerItems(sectorId, query);
+
+    if (!result) {
+      sendJson(response, 404, { message: "Setor não encontrado." });
       return;
     }
 
@@ -1984,6 +2516,7 @@ async function handleRequest(request, response) {
   logDebug(`[handleRequest] Current sectors (before readSectors):`, Array.from(sectors));
   // Usa um fallback para o host para evitar erros de construção de URL no Vercel
   const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  attachAuditLogger(request, response, pathname, searchParams);
 
   try {
     // Garantir sincronização de cache em ambiente Serverless
@@ -2003,6 +2536,11 @@ async function handleRequest(request, response) {
 
     if (request.method === "POST" && pathname === "/api/login") {
       await handleLogin(request, response);
+      return;
+    }
+
+    if (pathname.startsWith("/api/logs")) {
+      await handleLogsApi(request, response, pathname);
       return;
     }
 
@@ -2036,6 +2574,10 @@ async function handleRequest(request, response) {
       : statusCode >= 500
         ? "Erro interno do servidor."
         : error.message;
+    request.auditDetails = {
+      ...(request.auditDetails || {}),
+      error: error.message
+    };
     sendJson(response, statusCode, { 
       message: message,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
