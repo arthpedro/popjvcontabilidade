@@ -51,7 +51,7 @@ function getSupabaseConfigMessage() {
   }
 
   if (!supabaseServiceRoleKey) {
-    return "Upload bloqueado pelo Storage. Configure SUPABASE_SERVICE_ROLE_KEY no Vercel ou ajuste as policies do bucket setores.";
+    return "Operacao bloqueada pelo Storage. Configure SUPABASE_SERVICE_ROLE_KEY no Vercel ou ajuste as policies do bucket setores.";
   }
 
   return "Cloud Storage nao configurado.";
@@ -82,6 +82,7 @@ const defaultSectors = [
   { id: "legalizacao-processos", name: "Legaliza\u00e7\u00e3o e Processos" },
   { id: "ti", name: "T.I" }
 ];
+const usersConfigStoragePath = "_config/usuarios.json";
 const sectorsConfigStoragePath = "_config/setores.json";
 
 let sectors = new Set(defaultSectors.map((sector) => sector.id));
@@ -174,6 +175,19 @@ function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
 }
 
+function isPasswordHash(password) {
+  return /^[a-f0-9]{64}$/i.test(String(password || "")) || String(password || "").startsWith("$2");
+}
+
+function normalizeUserForStorage(user, index = 0) {
+  const normalized = normalizeUser(user, index);
+
+  return {
+    ...normalized,
+    senha: isPasswordHash(normalized.senha) ? normalized.senha : hashPassword(normalized.senha)
+  };
+}
+
 function normalizeUser(user, index = 0) {
   return {
     id: Number(user.id) || Date.now() + index,
@@ -219,61 +233,120 @@ async function writeJson(filePath, data) {
   await fs.rename(tempPath, filePath);
 }
 
+async function readUsersFromStorage() {
+  if (!supabase) {
+    return [];
+  }
+
+  try {
+    const { data, error } = await supabase.storage.from('setores').download(usersConfigStoragePath);
+
+    if (error) {
+      console.warn("Config de usuarios no Storage nao encontrada:", error.message);
+      return [];
+    }
+
+    const text = Buffer.from(await data.arrayBuffer()).toString("utf8");
+    const parsed = JSON.parse(text);
+    return (Array.isArray(parsed?.usuarios) ? parsed.usuarios : []).map(normalizeUser);
+  } catch (error) {
+    console.error("Erro ao ler config de usuarios no Storage:", error.message);
+    return [];
+  }
+}
+
+async function writeUsersToStorage(users) {
+  if (!supabase) {
+    throw new Error(getSupabaseConfigMessage());
+  }
+
+  const usersToStore = users.map(normalizeUserForStorage);
+  const body = Buffer.from(JSON.stringify({ usuarios: usersToStore }, null, 2), "utf8");
+  const { error } = await supabase.storage.from('setores').upload(usersConfigStoragePath, body, {
+    contentType: "application/json; charset=utf-8",
+    upsert: true
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return usersToStore;
+}
+
 async function readUsers() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('usuarios').select('*');
       if (error) {
         console.error("Erro ao buscar usuários no Supabase:", error.message);
-        // Fallback to default if Supabase query fails
-        return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+        const storageUsers = await readUsersFromStorage();
+        return storageUsers.length ? storageUsers : defaultUsersData.map(normalizeUserForStorage);
       } else if (data && data.length > 0) {
         return data.map(normalizeUser);
       } else if (!error && data && data.length === 0) {
         console.log("Populando usuários padrão no Supabase...");
-        const usersToUpsert = defaultUsersData.map(user => ({
-          ...user,
-          senha: hashPassword(user.senha)
-        }));
+        const storageUsers = await readUsersFromStorage();
+        const usersToUpsert = storageUsers.length
+          ? storageUsers.map(normalizeUserForStorage)
+          : defaultUsersData.map(normalizeUserForStorage);
         const { error: upsertError } = await supabase.from('usuarios').upsert(usersToUpsert);
         if (upsertError) {
           console.error("Erro ao popular usuários padrão no Supabase:", upsertError.message);
         }
+        await writeUsersToStorage(usersToUpsert);
         return usersToUpsert.map(normalizeUser);
       }
     } catch (e) {
       console.error("Erro inesperado ao interagir com Supabase (readUsers):", e.message);
-      // Fallback to default if Supabase interaction fails
-      return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+      const storageUsers = await readUsersFromStorage();
+      return storageUsers.length ? storageUsers : defaultUsersData.map(normalizeUserForStorage);
     }
   }
 
   // Fallback to local JSON if Supabase not configured or failed
   try {
-    const fallback = { usuarios: defaultUsersData.map(user => ({ ...user, senha: hashPassword(user.senha) })) };
+    const fallback = { usuarios: defaultUsersData.map(normalizeUserForStorage) };
     const data = await readJson(path.join(rootDir, "usuarios.json"), fallback);
     return (Array.isArray(data.usuarios) ? data.usuarios : []).map(normalizeUser);
   } catch (err) {
     console.error("Erro ao ler usuários do arquivo local:", err.message);
-    return defaultUsersData.map(user => normalizeUser({ ...user, senha: hashPassword(user.senha) }));
+    return defaultUsersData.map(normalizeUserForStorage);
   }
 }
 
 async function writeUsers(users) {
+  const usersToStore = users.map(normalizeUserForStorage);
+
   if (supabase) {
-    // Hash passwords before upserting to Supabase
-    const usersToUpsert = users.map(user => {
-      const normalized = normalizeUser(user);
-      // Only hash if a new password is provided or it's a new user
-      return {
-        ...normalized,
-        senha: normalized.senha.startsWith('$2a$') ? normalized.senha : hashPassword(normalized.senha) // Check if already hashed
-      };
-    });
-    await supabase.from('usuarios').upsert(usersToUpsert);
+    const { error } = await supabase.from('usuarios').upsert(usersToStore);
+
+    if (error) {
+      console.error("Erro ao salvar usuarios na tabela Supabase:", error.message);
+    } else {
+      const userIds = usersToStore.map((user) => Number(user.id)).filter(Boolean);
+
+      if (userIds.length > 0) {
+        const { error: deleteError } = await supabase
+          .from('usuarios')
+          .delete()
+          .not('id', 'in', `(${userIds.join(',')})`);
+
+        if (deleteError) {
+          console.error("Erro ao remover usuarios antigos da tabela Supabase:", deleteError.message);
+        }
+      }
+    }
+
+    await writeUsersToStorage(usersToStore);
     return;
   }
-  await writeJson(path.join(rootDir, "usuarios.json"), { usuarios: users.map(normalizeUser) });
+
+  if (isServerless) {
+    throw new Error(getSupabaseConfigMessage());
+  }
+
+  await writeJson(path.join(rootDir, "usuarios.json"), { usuarios: usersToStore });
 }
 
 function slugifySectorName(value) {
@@ -1046,7 +1119,16 @@ async function handleUsersApi(request, response, pathname) {
       return;
     }
 
-    await writeUsers(nextUsers);
+    try {
+      await writeUsers(nextUsers);
+    } catch (error) {
+      console.error("Erro ao criar usuario:", error.message);
+      sendJson(response, error.statusCode || error.status || 500, {
+        message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel salvar o usuario."
+      });
+      return;
+    }
+
     sendJson(response, 201, { usuario: publicUser(user) });
     return;
   }
@@ -1105,7 +1187,16 @@ async function handleUsersApi(request, response, pathname) {
       return;
     }
 
-    await writeUsers(nextUsers);
+    try {
+      await writeUsers(nextUsers);
+    } catch (error) {
+      console.error("Erro ao atualizar usuario:", error.message);
+      sendJson(response, error.statusCode || error.status || 500, {
+        message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel salvar o usuario."
+      });
+      return;
+    }
+
     sendJson(response, 200, { usuario: publicUser(nextUsers.find((user) => user.id === userId)) });
     return;
   }
@@ -1123,7 +1214,16 @@ async function handleUsersApi(request, response, pathname) {
       return;
     }
 
-    await writeUsers(nextUsers);
+    try {
+      await writeUsers(nextUsers);
+    } catch (error) {
+      console.error("Erro ao excluir usuario:", error.message);
+      sendJson(response, error.statusCode || error.status || 500, {
+        message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel excluir o usuario."
+      });
+      return;
+    }
+
     sendJson(response, 200, { ok: true });
     return;
   }
