@@ -2,6 +2,7 @@
   "name": "popjvcontabilidade",
   "version": "1.0.0",
   "description": "Portal de POPs com integração Supabase",
+  "private": true,
   "main": "server.js",
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
@@ -11,6 +12,8 @@
     "node": "24.x"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node --check server.js && node --check script.js"
   }
 }

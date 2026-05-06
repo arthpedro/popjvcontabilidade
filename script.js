@@ -16,19 +16,23 @@ uiStyles.textContent = `
   }
   .toast {
     pointer-events: auto;
-    background: var(--panel-bg, #fff);
-    color: var(--text-color, #333);
+    --toast-accent: var(--success, #18845f);
+    background: var(--surface, #fff);
+    color: var(--text, #333);
     padding: 16px 20px;
-    border-radius: 12px;
+    border: 1px solid var(--line, #e3e5e8);
+    border-left: 6px solid var(--toast-accent);
+    border-radius: 8px;
     box-shadow: 0 10px 25px rgba(0,0,0,0.15);
     min-width: 280px;
     max-width: 400px;
-    border-left: 6px solid #4caf50;
     position: relative;
     overflow: hidden;
     animation: toast-in 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
   }
-  .toast-error { border-left-color: #f44336; }
+  .toast-error { --toast-accent: var(--danger, #b42318); }
+  .toast-info { --toast-accent: #2563eb; }
+  .toast-warning { --toast-accent: #b7791f; }
   .toast-content { font-size: 0.95rem; font-weight: 500; margin-bottom: 4px; }
   .toast-progress {
     position: absolute;
@@ -40,8 +44,7 @@ uiStyles.textContent = `
   }
   .toast-progress-fill {
     height: 100%;
-    background: inherit;
-    border-left: inherit;
+    background: var(--toast-accent);
     width: 100%;
     opacity: 0.6;
   }
@@ -56,10 +59,18 @@ uiStyles.textContent = `
     to { transform: translateX(120%); opacity: 0; }
   }
 
-  .brand-logo {
-    border-radius: 50%;
-    object-fit: cover;
-    aspect-ratio: 1 / 1;
+  @media (max-width: 640px) {
+    .toast-container {
+      top: 16px;
+      right: 16px;
+      left: 16px;
+    }
+
+    .toast {
+      min-width: 0;
+      max-width: none;
+      width: 100%;
+    }
   }
 `;
 document.head.appendChild(uiStyles);
@@ -69,11 +80,13 @@ function showToast(message, type = 'success', duration = 4000) {
   if (!container) {
     container = document.createElement('div');
     container.className = 'toast-container';
+    container.setAttribute('aria-live', 'polite');
     document.body.appendChild(container);
   }
 
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
   toast.innerHTML = `
     <div class="toast-content">${escapeHtml(message)}</div>
     <div class="toast-progress"><div class="toast-progress-fill"></div></div>
@@ -83,6 +96,7 @@ function showToast(message, type = 'success', duration = 4000) {
 
   const fill = toast.querySelector('.toast-progress-fill');
   requestAnimationFrame(() => {
+    if (!fill) return;
     fill.style.transition = `width ${duration}ms linear`;
     fill.style.width = '0%';
   });
@@ -199,6 +213,7 @@ let currentPreviewUrl = "";
 let _lastFocusedElementForModal = null;
 let _loginTrapHandler = null;
 let cachedUsers = [];
+let currentExplorerItems = [];
 
 // --- Utilities ---
 function escapeHtml(value) {
@@ -398,6 +413,14 @@ function renderExplorerToolbar({ editable = false } = {}) {
               </div>
 
               <div class="explorer-address" data-explorer-address>Selecione um setor</div>
+              <label class="explorer-search">
+                <span class="sr-only">Buscar arquivos e pastas</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+                  <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M20 20l-3.4-3.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+                <input type="search" placeholder="Buscar na pasta atual" autocomplete="off" data-explorer-search disabled>
+              </label>
 ${actions}
             </div>`;
 }
@@ -916,6 +939,7 @@ const sectorMessage = document.querySelector("[data-sector-message]");
 const folderList = document.querySelector('[data-folder-list]');
 // explorer navigation buttons
 const explorerAddress = document.querySelector('[data-explorer-address]');
+const explorerSearchInput = document.querySelector('[data-explorer-search]');
 const explorerBackButton = document.querySelector('[data-explorer-back]');
 const explorerForwardButton = document.querySelector('[data-explorer-forward]');
 const explorerUpButton = document.querySelector('[data-explorer-up]');
@@ -1481,8 +1505,10 @@ function resetExplorerSelection(message = "Selecione um setor para acessar os ar
   selectedSector = null;
   currentExplorerPath = "";
   selectedExplorerItem = null;
+  currentExplorerItems = [];
   explorerBackStack = [];
   explorerForwardStack = [];
+  clearExplorerSearch();
   renderExplorerSectors();
   renderExplorerEmpty(message);
   updateExplorerControls();
@@ -2113,6 +2139,10 @@ function updateExplorerControls() {
     explorerAddress.textContent = getExplorerLabel();
   }
 
+  if (explorerSearchInput) {
+    explorerSearchInput.disabled = !hasSector;
+  }
+
   if (explorerBackButton) {
     explorerBackButton.disabled = explorerBackStack.length === 0;
   }
@@ -2202,7 +2232,7 @@ function createExplorerRow(item) {
       try {
         await downloadExplorerItem(item);
       } catch (err) {
-        window.alert(err.message || 'Não foi possível baixar o arquivo.');
+        showToast(err.message || 'Não foi possível baixar o arquivo.', 'error');
       }
     });
 
@@ -2221,11 +2251,43 @@ function renderExplorerRows(items) {
   folderList.innerHTML = "";
 
   if (items.length === 0) {
-    renderExplorerEmpty("Esta pasta esta vazia.");
+    const searchTerm = explorerSearchInput?.value.trim();
+    renderExplorerEmpty(
+      searchTerm
+        ? `Nenhum arquivo ou pasta encontrado para "${searchTerm}".`
+        : "Esta pasta está vazia."
+    );
     return;
   }
 
   items.forEach((item) => folderList.append(createExplorerRow(item)));
+}
+
+function clearExplorerSearch() {
+  if (explorerSearchInput) {
+    explorerSearchInput.value = "";
+  }
+}
+
+function filterExplorerItems(items, searchValue) {
+  const searchTerm = normalizeSearchText(searchValue);
+
+  if (!searchTerm) {
+    return items;
+  }
+
+  return items.filter((item) => {
+    const typeLabel = item.tipo === "folder" ? "pasta" : "arquivo";
+    const searchableText = `${item.nome} ${item.caminho} ${typeLabel} ${getFileExtension(item.nome)}`;
+    return normalizeSearchText(searchableText).includes(searchTerm);
+  });
+}
+
+function renderFilteredExplorerRows() {
+  selectedExplorerItem = null;
+  closeFileActionsDropdown();
+  renderExplorerRows(filterExplorerItems(currentExplorerItems, explorerSearchInput?.value));
+  updateExplorerControls();
 }
 
 async function loadExplorerPath(pathValue, { pushHistory = true } = {}) {
@@ -2235,10 +2297,15 @@ async function loadExplorerPath(pathValue, { pushHistory = true } = {}) {
   }
 
   const nextPath = normalizeExplorerPath(pathValue);
+  const pathChanged = nextPath !== currentExplorerPath;
 
   if (pushHistory && nextPath !== currentExplorerPath) {
     explorerBackStack.push(currentExplorerPath);
     explorerForwardStack = [];
+  }
+
+  if (pathChanged) {
+    clearExplorerSearch();
   }
 
   currentExplorerPath = nextPath;
@@ -2248,10 +2315,12 @@ async function loadExplorerPath(pathValue, { pushHistory = true } = {}) {
   try {
     const result = await getSectorFolders(selectedSector.id);
     currentExplorerPath = result.caminho;
-    renderExplorerRows(result.itens);
+    currentExplorerItems = result.itens;
+    renderFilteredExplorerRows();
     updateExplorerControls();
   } catch (error) {
-    window.alert(error.message || "Nao foi possivel carregar a pasta.");
+    showToast(error.message || "Não foi possível carregar a pasta.", "error");
+    currentExplorerItems = [];
     renderExplorerRows([]);
     updateExplorerControls();
   }
@@ -2264,8 +2333,10 @@ async function selectSector(button) {
   };
   currentExplorerPath = "";
   selectedExplorerItem = null;
+  currentExplorerItems = [];
   explorerBackStack = [];
   explorerForwardStack = [];
+  clearExplorerSearch();
 
   document.querySelectorAll("[data-sector-id]").forEach((sectorButton) => {
     sectorButton.classList.toggle("active", sectorButton === button);
@@ -2332,6 +2403,12 @@ async function openExplorerItem(item) {
   }
 
   const extension = getFileExtension(item.nome);
+
+  if (extension === ".doc") {
+    showToast("Arquivos .doc antigos não podem ser visualizados. Use .docx.", "error");
+    return;
+  }
+
   const action = extension === ".docx" ? "preview" : "download";
   const fileUrl = getExplorerPathUrl(selectedSector.id, action, item.caminho);
   const response = await fetch(fileUrl, {
@@ -2351,11 +2428,6 @@ async function openExplorerItem(item) {
 
   if (extension === ".docx") {
     await renderWordPreview(item.nome, response);
-    return;
-  }
-
-  if (extension === ".doc") {
-    showToast("Arquivos .doc antigos não podem ser visualizados. Use .docx.", "error");
     return;
   }
 
@@ -2458,14 +2530,18 @@ function showFileActionsDropdown(row, item) {
       try {
         await downloadExplorerItem(selectedExplorerItem);
       } catch (err) {
-        window.alert(err.message || 'Não foi possível baixar o arquivo.');
+        showToast(err.message || 'Não foi possível baixar o arquivo.', 'error');
       }
       closeFileActionsDropdown();
     }
 
     if (action === 'delete') {
-      // confirm and call API to delete file (admin only)
-      if (!confirm(`Deseja excluir o arquivo ${item.nome}? Esta ação é irreversível.`)) {
+      const confirmed = await customConfirm(
+        "Excluir Arquivo",
+        `Deseja excluir o arquivo "${item.nome}"? Esta ação é irreversível.`
+      );
+
+      if (!confirmed) {
         return;
       }
 
@@ -2715,6 +2791,8 @@ function initializeEventListeners() {
   on(sidebarElement, "click", handleSidebarSectorClick);
   on(folderList, "click", handleFolderListClick);
   on(folderList, "dblclick", handleFolderListDoubleClick);
+  on(explorerSearchInput, "input", renderFilteredExplorerRows);
+  on(explorerSearchInput, "search", renderFilteredExplorerRows);
   on(explorerBackButton, "click", goBackExplorer);
   on(explorerForwardButton, "click", goForwardExplorer);
   on(explorerUpButton, "click", goUpExplorer);

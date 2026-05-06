@@ -1,17 +1,62 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
+const fsSync = require("fs");
 const http = require("http");
 const mammoth = require("mammoth");
 const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
 
 const rootDir = process.cwd();
+
+function loadLocalEnv() {
+  if (process.env.VERCEL === "1") {
+    return;
+  }
+
+  const envPath = path.join(rootDir, ".env");
+
+  try {
+    const content = fsSync.readFileSync(envPath, "utf8");
+
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+
+      const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+
+      if (!match || process.env[match[1]] !== undefined) {
+        continue;
+      }
+
+      const value = match[2].trim().replace(/^(['"])(.*)\1$/, "$2");
+      process.env[match[1]] = value;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn("Não foi possível carregar o arquivo .env:", error.message);
+    }
+  }
+}
+
+loadLocalEnv();
+
 const dataDir = path.join(rootDir, "dados");
 const sectorsDir = path.join(dataDir, "setores");
 const port = Number(process.env.PORT) || 3000;
 const appShellRoutes = new Set(["/", "/index.html", "/arquivos.html", "/setores.html", "/staff.html"]);
 const isServerless = process.env.VERCEL === '1';
 const MAX_BODY_SIZE = isServerless ? 4.5 * 1024 * 1024 : 50 * 1024 * 1024;
+const MAX_JSON_BODY_SIZE = 1024 * 1024;
+const debugLogsEnabled = /^(1|true|yes)$/i.test(process.env.DEBUG_LOGS || "");
+
+function logDebug(...args) {
+  if (debugLogsEnabled) {
+    console.log(...args);
+  }
+}
 
 // Configuração Supabase (Vão nas variáveis de ambiente do Vercel depois)
 const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
@@ -116,10 +161,18 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, X-User-Id"
 };
 
+const securityHeaders = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "SAMEORIGIN",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()"
+};
+
 function sendJson(response, statusCode, data) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
+    ...securityHeaders,
     ...corsHeaders
   });
   response.end(JSON.stringify(data));
@@ -129,6 +182,7 @@ function sendHtml(response, statusCode, html) {
   response.writeHead(statusCode, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
+    ...securityHeaders,
     ...corsHeaders
   });
   response.end(html);
@@ -200,7 +254,7 @@ function normalizeUser(user, index = 0) {
 }
 
 async function readJson(filePath, fallback) {
-  console.log(`[readJson] Attempting to read: ${filePath}`);
+  logDebug(`[readJson] Attempting to read: ${filePath}`);
   try {
     if (isServerless) return fallback;
     const content = await fs.readFile(filePath, "utf8");
@@ -219,7 +273,7 @@ async function readJson(filePath, fallback) {
 }
 
 async function writeJson(filePath, data) {
-  console.log(`[writeJson] Attempting to write: ${filePath}`);
+  logDebug(`[writeJson] Attempting to write: ${filePath}`);
   if (isServerless) {
     // Aqui você faria um: await supabase.from('config').upsert({ id: filePath, data })
     return;
@@ -285,7 +339,7 @@ async function readUsers() {
       } else if (data && data.length > 0) {
         return data.map(normalizeUser);
       } else if (!error && data && data.length === 0) {
-        console.log("Populando usuários padrão no Supabase...");
+        logDebug("Populando usuários padrão no Supabase...");
         const storageUsers = await readUsersFromStorage();
         const usersToUpsert = storageUsers.length
           ? storageUsers.map(normalizeUserForStorage)
@@ -486,14 +540,14 @@ async function readSectors() {
       } else if (data && data.length > 0) {
         const sectorList = normalizeSectorsList(data);
         updateSectorCache(sectorList);
-        console.log(`[readSectors] Sectors cache updated from Supabase. Current sectors:`, Array.from(sectors));
+        logDebug(`[readSectors] Sectors cache updated from Supabase. Current sectors:`, Array.from(sectors));
         return sectorList;
       } else {
-        console.log("Tabela 'setores' do Supabase vazia. Usando Storage/default.");
+        logDebug("Tabela 'setores' do Supabase vazia. Usando Storage/default.");
         const storageSectors = await readSectorsFromStorage();
         const sectorList = storageSectors.length ? storageSectors : normalizeSectorsList(defaultSectors);
         updateSectorCache(sectorList);
-        console.log(`[readSectors] Sectors cache updated with default sectors (Supabase empty). Current sectors:`, Array.from(sectors));
+        logDebug(`[readSectors] Sectors cache updated with default sectors (Supabase empty). Current sectors:`, Array.from(sectors));
         return sectorList;
       }
     } catch (e) {
@@ -501,7 +555,7 @@ async function readSectors() {
       const storageSectors = await readSectorsFromStorage();
       const sectorList = storageSectors.length ? storageSectors : normalizeSectorsList(defaultSectors);
       updateSectorCache(sectorList);
-      console.log(`[readSectors] Sectors cache updated with default sectors (Supabase error). Current sectors:`, Array.from(sectors));
+      logDebug(`[readSectors] Sectors cache updated with default sectors (Supabase error). Current sectors:`, Array.from(sectors));
       return sectorList;
     }
   }
@@ -516,7 +570,7 @@ async function readSectors() {
     sectorList = normalizeSectorsList(defaultSectors);
   }
   updateSectorCache(sectorList);
-  console.log(`[readSectors] Sectors cache updated from local/default. Current sectors:`, Array.from(sectors));
+  logDebug(`[readSectors] Sectors cache updated from local/default. Current sectors:`, Array.from(sectors));
   return sectorList;
 }
 
@@ -550,17 +604,35 @@ function hasActiveAdmin(users) {
 }
 
 async function readBody(request) {
-  let body = "";
+  const chunks = [];
+  let size = 0;
 
   for await (const chunk of request) {
-    body += chunk;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
 
-    if (body.length > 1024 * 1024) {
-      throw new Error("Payload muito grande.");
+    if (size > MAX_JSON_BODY_SIZE) {
+      const error = new Error("Payload muito grande.");
+      error.statusCode = 413;
+      throw error;
     }
+
+    chunks.push(buffer);
   }
 
-  return body ? JSON.parse(body) : {};
+  const body = Buffer.concat(chunks).toString("utf8").trim();
+
+  if (!body) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch (parseError) {
+    const error = new Error("JSON inválido.");
+    error.statusCode = 400;
+    throw error;
+  }
 }
 
 async function readRawBody(request, limit = 50 * 1024 * 1024) {
@@ -646,7 +718,7 @@ async function ensureSectorRoots() {
 }
 
 function getSectorRoot(sectorId) {
-  console.log(`[getSectorRoot] Checking for sectorId: ${sectorId}. Current sectors in cache:`, Array.from(sectors));
+  logDebug(`[getSectorRoot] Checking for sectorId: ${sectorId}. Current sectors in cache:`, Array.from(sectors));
   if (!(sectors instanceof Set)) {
     console.error(`[getSectorRoot] 'sectors' is not a Set. Re-initializing defensively.`);
     sectors = new Set(defaultSectors.map(s => s.id)); // Defensive re-initialization
@@ -885,7 +957,15 @@ async function sendExplorerDownload(response, sectorId, filePath) {
     }
     const buffer = Buffer.from(await data.arrayBuffer());
     const extension = path.extname(item.relativePath).toLowerCase();
-    response.writeHead(200, { "Content-Type": mimeTypes[extension] || "application/octet-stream", "Content-Length": buffer.length });
+    const filename = path.basename(item.relativePath);
+    response.writeHead(200, {
+      "Content-Type": mimeTypes[extension] || "application/octet-stream",
+      "Content-Length": buffer.length,
+      "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      "Cache-Control": "no-store",
+      ...securityHeaders,
+      ...corsHeaders
+    });
     response.end(buffer);
     return;
   }
@@ -905,6 +985,7 @@ async function sendExplorerDownload(response, sectorId, filePath) {
       "Content-Length": stat.size,
       "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
       "Cache-Control": "no-store",
+      ...securityHeaders,
       ...corsHeaders
     });
 
@@ -1601,7 +1682,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     if (supabase) {
       const newPath = joinRelativePath(parentRelativePath(item.storagePath), nameValidation.itemName);
-      console.log(`[handleFoldersApi PUT rename] Supabase: Moving '${item.storagePath}' to '${newPath}'`);
+      logDebug(`[handleFoldersApi PUT rename] Supabase: Moving '${item.storagePath}' to '${newPath}'`);
       const { error } = await supabase.storage.from('setores').move(item.storagePath, newPath);
       if (error) throw error;
       sendJson(response, 200, { ok: true });
@@ -1669,7 +1750,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       const { error } = await supabase.storage.from('setores').remove([item.storagePath]);
       if (error) throw error;
       sendJson(response, 200, { ok: true });
-      console.log(`[handleFoldersApi DELETE file] Supabase: Removed '${item.storagePath}'`);
+      logDebug(`[handleFoldersApi DELETE file] Supabase: Removed '${item.storagePath}'`);
       return;
     }
 
@@ -1809,8 +1890,8 @@ async function handlePublicFoldersApi(request, response, pathname, searchParams)
 
   if (explorerMatch && request.method === "GET") {
     const sectorId = decodeURIComponent(explorerMatch[1]);
-    console.log(`[handlePublicFoldersApi] Explorer GET for sectorId: ${sectorId}`);
-    console.log(`[handlePublicFoldersApi] sectors.has(${sectorId}) before readSectors: ${sectors.has(sectorId)}`);
+    logDebug(`[handlePublicFoldersApi] Explorer GET for sectorId: ${sectorId}`);
+    logDebug(`[handlePublicFoldersApi] sectors.has(${sectorId}) before readSectors: ${sectors.has(sectorId)}`);
 
     // Garante que o cache de setores esteja populado se o ID não for encontrado (Serverless)
     if (!sectors.has(sectorId)) {
@@ -1850,9 +1931,12 @@ async function serveStatic(request, response, pathname) {
   const cleanPath = appShellRoutes.has(pathname) ? "/index.html" : pathname;
   const extension = path.extname(cleanPath).toLowerCase();
 
-  console.log(`[serveStatic] Serving static file: ${cleanPath}, extension: ${extension}`);
+  logDebug(`[serveStatic] Serving static file: ${cleanPath}, extension: ${extension}`);
   if (!mimeTypes[extension]) {
-    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    response.writeHead(404, {
+      "Content-Type": "text/plain; charset=utf-8",
+      ...securityHeaders
+    });
     response.end("Arquivo não encontrado.");
     return;
   }
@@ -1862,7 +1946,10 @@ async function serveStatic(request, response, pathname) {
   const resolvedRoot = path.resolve(rootDir);
 
   if (!filePath.startsWith(`${resolvedRoot}${path.sep}`)) {
-    response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+    response.writeHead(403, {
+      "Content-Type": "text/plain; charset=utf-8",
+      ...securityHeaders
+    });
     response.end("Acesso negado.");
     return;
   }
@@ -1871,13 +1958,17 @@ async function serveStatic(request, response, pathname) {
     const content = await fs.readFile(filePath);
     response.writeHead(200, {
       "Content-Type": mimeTypes[extension],
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
+      ...securityHeaders
     });
     response.end(content);
   } catch (error) {
     if (error.code === "ENOENT") {
       console.warn(`[serveStatic] File not found: ${filePath}`);
-      response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      response.writeHead(404, {
+        "Content-Type": "text/plain; charset=utf-8",
+        ...securityHeaders
+      });
       response.end("Arquivo não encontrado.");
       return;
     }
@@ -1887,10 +1978,10 @@ async function serveStatic(request, response, pathname) {
 }
 
 async function handleRequest(request, response) {
-  console.log(`[handleRequest] Invoked for URL: ${request.url}`);
-  console.log(`[handleRequest] isServerless: ${isServerless}`);
-  console.log(`[handleRequest] Supabase client initialized: ${!!supabase}`);
-  console.log(`[handleRequest] Current sectors (before readSectors):`, Array.from(sectors));
+  logDebug(`[handleRequest] Invoked for URL: ${request.url}`);
+  logDebug(`[handleRequest] isServerless: ${isServerless}`);
+  logDebug(`[handleRequest] Supabase client initialized: ${!!supabase}`);
+  logDebug(`[handleRequest] Current sectors (before readSectors):`, Array.from(sectors));
   // Usa um fallback para o host para evitar erros de construção de URL no Vercel
   const { pathname, searchParams } = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
 
@@ -1898,11 +1989,14 @@ async function handleRequest(request, response) {
     // Garantir sincronização de cache em ambiente Serverless
     if (isServerless) {
       await readSectors();
-      console.log(`[handleRequest] Current sectors (after readSectors):`, Array.from(sectors));
+      logDebug(`[handleRequest] Current sectors (after readSectors):`, Array.from(sectors));
     }
 
     if (request.method === "OPTIONS") {
-      response.writeHead(204, corsHeaders);
+      response.writeHead(204, {
+        ...securityHeaders,
+        ...corsHeaders
+      });
       response.end();
       return;
     }
@@ -1935,9 +2029,13 @@ async function handleRequest(request, response) {
     await serveStatic(request, response, pathname);
   } catch (error) {
     console.error(error);
-    console.error(`[handleRequest] Error details: ${error.stack}`);
-    const statusCode = error.code === 'ENOENT' ? 404 : 500;
-    const message = statusCode === 404 ? "Recurso não encontrado" : "Erro interno do servidor.";
+    logDebug(`[handleRequest] Error details: ${error.stack}`);
+    const statusCode = error.statusCode || error.status || (error.code === 'ENOENT' ? 404 : 500);
+    const message = statusCode === 404
+      ? "Recurso não encontrado"
+      : statusCode >= 500
+        ? "Erro interno do servidor."
+        : error.message;
     sendJson(response, statusCode, { 
       message: message,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -1946,7 +2044,7 @@ async function handleRequest(request, response) {
 }
 
 async function start() {
-  console.log("[start] Initializing server...");
+  logDebug("[start] Initializing server...");
   // Validação de ambiente crítica
   if (isServerless && (!supabaseUrl || !supabaseKey)) {
     console.warn("Aviso: Supabase nao configurado. O sistema funcionara apenas em modo leitura estatica.");
