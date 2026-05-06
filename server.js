@@ -20,14 +20,41 @@ const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').tri
 const supabaseKey = supabaseServiceRoleKey || supabaseAnonKey;
 
 let supabase = null;
+let supabaseInitError = "";
 if (supabaseUrl && supabaseKey) {
   try {
     // Validação básica de URL para evitar crash na inicialização
     new URL(supabaseUrl);
     supabase = createClient(supabaseUrl, supabaseKey);
   } catch (e) {
+    supabaseInitError = "SUPABASE_URL invalida ou malformada.";
     console.error("Erro ao inicializar Supabase: URL inválida ou malformada.");
   }
+}
+
+function getSupabaseConfigMessage() {
+  const missing = [];
+
+  if (!supabaseUrl) missing.push("SUPABASE_URL");
+  if (!supabaseKey) missing.push("SUPABASE_SERVICE_ROLE_KEY ou SUPABASE_ANON_KEY");
+
+  if (missing.length > 0) {
+    return `Cloud Storage nao configurado. Configure no Vercel: ${missing.join(", ")}.`;
+  }
+
+  if (!supabase && supabaseInitError) {
+    return `Cloud Storage nao configurado. ${supabaseInitError}`;
+  }
+
+  if (!supabase) {
+    return "Cloud Storage nao configurado. Verifique as variaveis SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no Vercel.";
+  }
+
+  if (!supabaseServiceRoleKey) {
+    return "Upload bloqueado pelo Storage. Configure SUPABASE_SERVICE_ROLE_KEY no Vercel ou ajuste as policies do bucket setores.";
+  }
+
+  return "Cloud Storage nao configurado.";
 }
 
 const defaultUsersData = [
@@ -1208,7 +1235,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     const fileName = payload.filename;
 
     if (!supabase) {
-      sendJson(response, 400, { message: "Cloud Storage não configurado." });
+      sendJson(response, 400, { message: getSupabaseConfigMessage() });
       return;
     }
 
@@ -1233,7 +1260,9 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     if (error) {
       console.error("Erro ao gerar URL assinada de upload:", error.message);
-      sendJson(response, error.statusCode || error.status || 500, { message: "Nao foi possivel preparar o upload no Storage." });
+      sendJson(response, error.statusCode || error.status || 500, {
+        message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel preparar o upload no Storage."
+      });
       return;
     }
 
@@ -1257,7 +1286,7 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (isServerless && !supabase) {
-      sendJson(response, 400, { message: "Cloud Storage nao configurado para upload no Vercel." });
+      sendJson(response, 400, { message: getSupabaseConfigMessage() });
       return;
     }
 
@@ -1293,7 +1322,9 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
       if (error) {
         console.error("Erro ao enviar arquivo para o Supabase Storage:", error.message);
-        sendJson(response, error.statusCode || error.status || 500, { message: "Nao foi possivel enviar o arquivo para o Storage." });
+        sendJson(response, error.statusCode || error.status || 500, {
+          message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel enviar o arquivo para o Storage."
+        });
         return;
       }
 
