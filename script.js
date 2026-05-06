@@ -1132,30 +1132,81 @@ async function renameSectorItem(sectorId, caminho, nome) {
   });
 }
 
-async function uploadSectorFile(sectorId, file) {
+async function getFetchErrorMessage(response, fallbackMessage) {
+  const responseCopy = response.clone();
+
+  try {
+    const data = await response.json();
+    return data.message || data.error || fallbackMessage;
+  } catch (error) {
+    try {
+      const text = await responseCopy.text();
+      return text || fallbackMessage;
+    } catch (innerError) {
+      return fallbackMessage;
+    }
+  }
+}
+
+function canFallbackToLocalUpload() {
+  return window.location.protocol === "file:" || ["localhost", "127.0.0.1"].includes(window.location.hostname);
+}
+
+async function uploadSectorFileToSignedUrl(sectorId, file) {
+  const signedUpload = await apiRequest(`/api/setores/${encodeURIComponent(sectorId)}/sign-upload?path=${encodeURIComponent(currentExplorerPath)}`, {
+    method: "POST",
+    headers: getSessionUserHeader(),
+    body: {
+      filename: file.name,
+      contentType: file.type || "application/octet-stream"
+    }
+  });
+
+  const uploadBody = new FormData();
+  uploadBody.append("cacheControl", "3600");
+  uploadBody.append("", file);
+
+  const response = await fetch(signedUpload.uploadUrl, {
+    method: "PUT",
+    headers: {
+      "x-upsert": "true"
+    },
+    body: uploadBody
+  });
+
+  if (!response.ok) {
+    throw new Error(await getFetchErrorMessage(response, "Nao foi possivel enviar o arquivo para o Storage."));
+  }
+
+  return { ok: true, path: signedUpload.path };
+}
+
+async function uploadSectorFileThroughApi(sectorId, file) {
   const formData = new FormData();
   formData.append("file", file);
 
+  const response = await fetch(`${apiBaseUrl}/api/setores/${encodeURIComponent(sectorId)}/upload?path=${encodeURIComponent(currentExplorerPath)}`, {
+    method: "POST",
+    headers: getSessionUserHeader(),
+    body: formData
+  });
+
+  if (!response.ok) {
+    throw new Error(await getFetchErrorMessage(response, "Nao foi possivel enviar o arquivo."));
+  }
+
+  return response.json();
+}
+
+async function uploadSectorFile(sectorId, file) {
   try {
-    const response = await fetch(`${apiBaseUrl}/api/setores/${encodeURIComponent(sectorId)}/upload?path=${encodeURIComponent(currentExplorerPath)}`, {
-      method: "POST",
-      headers: getSessionUserHeader(),
-      body: formData
-    });
-    
-    let data;
-    try {
-      data = await response.json();
-    } catch(e) {
-      data = {};
+    return await uploadSectorFileToSignedUrl(sectorId, file);
+  } catch (error) {
+    if (!canFallbackToLocalUpload()) {
+      throw error;
     }
 
-    if (!response.ok) {
-      throw new Error(data.message || "Não foi possível enviar o arquivo.");
-    }
-    return data;
-  } catch (error) {
-    throw error;
+    return uploadSectorFileThroughApi(sectorId, file);
   }
 }
 

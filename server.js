@@ -15,7 +15,9 @@ const MAX_BODY_SIZE = isServerless ? 4.5 * 1024 * 1024 : 50 * 1024 * 1024;
 
 // Configuração Supabase (Vão nas variáveis de ambiente do Vercel depois)
 const supabaseUrl = (process.env.SUPABASE_URL || '').trim();
-const supabaseKey = (process.env.SUPABASE_ANON_KEY || '').trim();
+const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || '').trim();
+const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const supabaseKey = supabaseServiceRoleKey || supabaseAnonKey;
 
 let supabase = null;
 if (supabaseUrl && supabaseKey) {
@@ -1225,14 +1227,22 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     const fullPath = joinRelativePath(current.storagePath, nameValidation.itemName);
     
-    const { data, error } = await supabase.storage.from('setores').createSignedUploadUrl(fullPath);
+    const { data, error } = await supabase.storage.from('setores').createSignedUploadUrl(fullPath, {
+      upsert: true
+    });
 
     if (error) {
-      sendJson(response, 500, { message: "Erro ao gerar permissão de upload." });
+      console.error("Erro ao gerar URL assinada de upload:", error.message);
+      sendJson(response, error.statusCode || error.status || 500, { message: "Nao foi possivel preparar o upload no Storage." });
       return;
     }
 
-    sendJson(response, 200, { uploadUrl: data.signedUrl, token: data.token });
+    sendJson(response, 200, {
+      uploadUrl: data.signedUrl,
+      token: data.token,
+      path: data.path,
+      contentType: payload.contentType || mimeTypes[path.extname(fullPath).toLowerCase()] || "application/octet-stream"
+    });
     return;
   }
 
@@ -1246,7 +1256,23 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       return;
     }
 
-    const body = await readRawBody(request);
+    if (isServerless && !supabase) {
+      sendJson(response, 400, { message: "Cloud Storage nao configurado para upload no Vercel." });
+      return;
+    }
+
+    let body;
+    try {
+      body = await readRawBody(request, MAX_BODY_SIZE);
+    } catch (error) {
+      if (error.message === "Arquivo muito grande.") {
+        sendJson(response, 413, { message: "Arquivo muito grande para upload pela API. Use o upload direto para o Storage." });
+        return;
+      }
+
+      throw error;
+    }
+
     const upload = parseMultipartFile(request, body);
     const nameValidation = validateItemName(upload?.filename);
 
@@ -1265,7 +1291,11 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
         upsert: true 
       });
 
-      if (error) throw error;
+      if (error) {
+        console.error("Erro ao enviar arquivo para o Supabase Storage:", error.message);
+        sendJson(response, error.statusCode || error.status || 500, { message: "Nao foi possivel enviar o arquivo para o Storage." });
+        return;
+      }
 
       sendJson(response, 201, { ok: true });
       return;
@@ -1667,8 +1697,12 @@ async function handleRequest(request, response) {
 async function start() {
   console.log("[start] Initializing server...");
   // Validação de ambiente crítica
-  if (isServerless && !supabaseUrl) {
-    console.warn("Aviso: SUPABASE_URL não configurada. O sistema funcionará apenas em modo leitura estática.");
+  if (isServerless && (!supabaseUrl || !supabaseKey)) {
+    console.warn("Aviso: Supabase nao configurado. O sistema funcionara apenas em modo leitura estatica.");
+  }
+
+  if (isServerless && supabase && !supabaseServiceRoleKey) {
+    console.warn("Aviso: SUPABASE_SERVICE_ROLE_KEY nao configurada. Uploads dependem das policies do Storage.");
   }
 
   // No Vercel, o ambiente serverless não requer o início manual do servidor via .listen()
