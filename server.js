@@ -5,14 +5,12 @@ const mammoth = require("mammoth");
 const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
 
-// No ambiente Serverless (Vercel), não usamos caminhos locais para dados
 const rootDir = process.cwd();
 const dataDir = path.join(rootDir, "dados");
 const sectorsDir = path.join(dataDir, "setores");
 const port = Number(process.env.PORT) || 3000;
 const appShellRoutes = new Set(["/", "/index.html", "/arquivos.html", "/setores.html", "/staff.html"]);
 const isServerless = process.env.VERCEL === '1';
-const MAX_FILE_SIZE_MB = 50; // Limite do Supabase Free
 const MAX_BODY_SIZE = isServerless ? 4.5 * 1024 * 1024 : 50 * 1024 * 1024;
 
 // Configuração Supabase (Vão nas variáveis de ambiente do Vercel depois)
@@ -590,6 +588,14 @@ function parentRelativePath(relativePath) {
   return parts.join("/");
 }
 
+function emptyExplorerResult(current) {
+  return {
+    caminho: current.relativePath,
+    pai: parentRelativePath(current.relativePath),
+    itens: []
+  };
+}
+
 async function listExplorerItems(sectorId, relativePath = "") {
   const current = getExplorerPath(sectorId, relativePath);
   if (!current) {
@@ -601,10 +607,12 @@ async function listExplorerItems(sectorId, relativePath = "") {
     
     if (error) throw error;
 
+    const visibleItems = data.filter(item => item.name !== ".folder");
+
     return {
       caminho: current.relativePath,
       pai: parentRelativePath(current.relativePath),
-      itens: data.map(item => ({
+      itens: visibleItems.map(item => ({
         id: joinRelativePath(current.relativePath, item.name),
         nome: item.name,
         tipo: item.id ? "file" : "folder",
@@ -626,6 +634,10 @@ async function listExplorerItems(sectorId, relativePath = "") {
     // ... rest of local filesystem logic
   } catch (error) {
     if (error.code === "ENOENT") {
+      if (isServerless && !current.relativePath) {
+        return emptyExplorerResult(current);
+      }
+
       return null;
     }
 
@@ -1135,18 +1147,35 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     const targetPath = path.join(current.absolutePath, nameValidation.itemName);
 
+    if (supabase) {
+      // Supabase Storage is virtual; create a hidden marker so empty folders can be listed.
+      const placeholderPath = joinRelativePath(
+        joinRelativePath(current.storagePath, nameValidation.itemName),
+        ".folder"
+      );
+      const { error } = await supabase.storage.from('setores').upload(placeholderPath, Buffer.from(""), {
+        contentType: "application/octet-stream",
+        upsert: false
+      });
+
+      if (error) {
+        if (String(error.message || "").toLowerCase().includes("already exists")) {
+          sendJson(response, 409, { message: "Ja existe um item com esse nome nesta pasta." });
+          return;
+        }
+
+        throw error;
+      }
+
+      sendJson(response, 201, { ok: true });
+      return;
+    }
+
     try {
       const currentStat = await fs.stat(current.absolutePath);
 
       if (!currentStat.isDirectory()) {
         sendJson(response, 400, { message: "O destino selecionado nao e uma pasta." });
-        return;
-      }
-
-      if (supabase) {
-        // No Supabase, pastas são criadas automaticamente ao subir um arquivo .placeholder ou similar
-        // Para manter a lógica, apenas retornamos sucesso já que o Storage é virtual
-        sendJson(response, 201, { ok: true });
         return;
       }
 
@@ -1181,8 +1210,20 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       return;
     }
 
-    const normalized = normalizeRelativePath(currentPath);
-    const fullPath = joinRelativePath(normalized.relativePath, fileName);
+    const current = getExplorerPath(sectorId, currentPath);
+    const nameValidation = validateItemName(fileName);
+
+    if (!current) {
+      sendJson(response, 404, { message: "Pasta nao encontrada." });
+      return;
+    }
+
+    if (nameValidation.error) {
+      sendJson(response, 400, { message: "Selecione um arquivo com nome valido." });
+      return;
+    }
+
+    const fullPath = joinRelativePath(current.storagePath, nameValidation.itemName);
     
     const { data, error } = await supabase.storage.from('setores').createSignedUploadUrl(fullPath);
 
@@ -1278,9 +1319,10 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (supabase) {
-      console.log(`[handleFoldersApi PUT rename] Supabase: Moving '${item.relativePath}' to '${newPath}'`);
-      const newPath = joinRelativePath(parentRelativePath(item.relativePath), nameValidation.itemName);
-      await supabase.storage.from('setores').move(item.relativePath, newPath);
+      const newPath = joinRelativePath(parentRelativePath(item.storagePath), nameValidation.itemName);
+      console.log(`[handleFoldersApi PUT rename] Supabase: Moving '${item.storagePath}' to '${newPath}'`);
+      const { error } = await supabase.storage.from('setores').move(item.storagePath, newPath);
+      if (error) throw error;
       sendJson(response, 200, { ok: true });
       return;
     }
@@ -1343,9 +1385,10 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
     }
 
     if (supabase) {
-      await supabase.storage.from('setores').remove([item.relativePath]);
+      const { error } = await supabase.storage.from('setores').remove([item.storagePath]);
+      if (error) throw error;
       sendJson(response, 200, { ok: true });
-      console.log(`[handleFoldersApi DELETE file] Supabase: Removed '${item.relativePath}'`);
+      console.log(`[handleFoldersApi DELETE file] Supabase: Removed '${item.storagePath}'`);
       return;
     }
 
