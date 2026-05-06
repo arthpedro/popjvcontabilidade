@@ -878,7 +878,8 @@ async function appendAuditLog(request, { pathname, searchParams, statusCode }) {
 }
 
 function attachAuditLogger(request, response, pathname, searchParams) {
-  if (!pathname.startsWith("/api/")) {
+  // O log agora exibe apenas alterações (POST, PUT, DELETE) e ignora consultas (GET)
+  if (!pathname.startsWith("/api/") || request.method === "GET") {
     return;
   }
 
