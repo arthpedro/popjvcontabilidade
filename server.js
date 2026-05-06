@@ -82,6 +82,7 @@ const defaultSectors = [
   { id: "legalizacao-processos", name: "Legaliza\u00e7\u00e3o e Processos" },
   { id: "ti", name: "T.I" }
 ];
+const sectorsConfigStoragePath = "_config/setores.json";
 
 let sectors = new Set(defaultSectors.map((sector) => sector.id));
 
@@ -322,14 +323,91 @@ function publicSector(sector) {
   };
 }
 
+function getSectorNameFromId(sectorId) {
+  return String(sectorId || "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+async function readSectorsFromStorage() {
+  if (!supabase) {
+    return [];
+  }
+
+  try {
+    const { data, error } = await supabase.storage.from('setores').download(sectorsConfigStoragePath);
+
+    if (error) {
+      console.warn("Config de setores no Storage nao encontrada:", error.message);
+    } else {
+      const text = Buffer.from(await data.arrayBuffer()).toString("utf8");
+      const parsed = JSON.parse(text);
+      return normalizeSectorsList(Array.isArray(parsed?.setores) ? parsed.setores : []);
+    }
+  } catch (error) {
+    console.error("Erro ao ler config de setores no Storage:", error.message);
+  }
+
+  try {
+    const { data, error } = await supabase.storage.from('setores').list('', {
+      sortBy: { column: 'name', order: 'asc' }
+    });
+
+    if (error) throw error;
+
+    return normalizeSectorsList(
+      data
+        .filter((item) => !item.id && !item.name.startsWith("_"))
+        .map((item) => ({ id: item.name, name: getSectorNameFromId(item.name) }))
+    );
+  } catch (error) {
+    console.error("Erro ao inferir setores pelo Storage:", error.message);
+    return [];
+  }
+}
+
+async function writeSectorsToStorage(sectorList) {
+  if (!supabase) {
+    throw new Error(getSupabaseConfigMessage());
+  }
+
+  const body = Buffer.from(JSON.stringify({ setores: sectorList }, null, 2), "utf8");
+  const { error } = await supabase.storage.from('setores').upload(sectorsConfigStoragePath, body, {
+    contentType: "application/json; charset=utf-8",
+    upsert: true
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function ensureSectorStorageRoot(sectorId) {
+  if (!supabase) {
+    return;
+  }
+
+  const markerPath = joinRelativePath(sectorId, ".folder");
+  const { error } = await supabase.storage.from('setores').upload(markerPath, Buffer.from(""), {
+    contentType: "application/octet-stream",
+    upsert: true
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
 async function readSectors() {
   if (supabase) {
     try {
       const { data, error } = await supabase.from('setores').select('*');
       if (error) {
         console.error("Erro ao buscar setores no Supabase:", error.message);
-        // Fallback to default if Supabase query fails
-        const sectorList = normalizeSectorsList(defaultSectors);
+        const storageSectors = await readSectorsFromStorage();
+        const sectorList = storageSectors.length ? storageSectors : normalizeSectorsList(defaultSectors);
         updateSectorCache(sectorList);
         return sectorList;
       } else if (data && data.length > 0) {
@@ -338,16 +416,17 @@ async function readSectors() {
         console.log(`[readSectors] Sectors cache updated from Supabase. Current sectors:`, Array.from(sectors));
         return sectorList;
       } else {
-        console.log("Tabela 'setores' do Supabase vazia. Usando setores padrão.");
-        const sectorList = normalizeSectorsList(defaultSectors);
+        console.log("Tabela 'setores' do Supabase vazia. Usando Storage/default.");
+        const storageSectors = await readSectorsFromStorage();
+        const sectorList = storageSectors.length ? storageSectors : normalizeSectorsList(defaultSectors);
         updateSectorCache(sectorList);
         console.log(`[readSectors] Sectors cache updated with default sectors (Supabase empty). Current sectors:`, Array.from(sectors));
         return sectorList;
       }
     } catch (e) {
       console.error("Erro inesperado ao interagir com Supabase (readSectors):", e.message);
-      // Fallback to default if Supabase interaction fails
-      const sectorList = normalizeSectorsList(defaultSectors);
+      const storageSectors = await readSectorsFromStorage();
+      const sectorList = storageSectors.length ? storageSectors : normalizeSectorsList(defaultSectors);
       updateSectorCache(sectorList);
       console.log(`[readSectors] Sectors cache updated with default sectors (Supabase error). Current sectors:`, Array.from(sectors));
       return sectorList;
@@ -371,8 +450,18 @@ async function readSectors() {
 async function writeSectors(sectorList) {
   const normalizedSectors = normalizeSectorsList(sectorList);
   if (supabase) {
-    await supabase.from('setores').upsert(normalizedSectors);
+    const { error } = await supabase.from('setores').upsert(normalizedSectors);
+
+    if (error) {
+      console.error("Erro ao salvar setores na tabela Supabase:", error.message);
+    }
+
+    await writeSectorsToStorage(normalizedSectors);
   } else {
+    if (isServerless) {
+      throw new Error(getSupabaseConfigMessage());
+    }
+
     await writeJson(path.join(rootDir, "dados", "setores.json"), { setores: normalizedSectors });
   }
   updateSectorCache(normalizedSectors);
@@ -856,7 +945,7 @@ async function listSectorFolders(sectorId) {
       const { data, error } = await supabase.storage.from('setores').list('', { sortBy: { column: 'name', order: 'asc' } });
       if (error) throw error;
       // Retorna apenas itens que não possuem ID (no Supabase Storage, itens sem ID são pastas)
-      return data.filter(item => !item.id).map(folder => ({
+      return data.filter(item => !item.id && !item.name.startsWith("_")).map(folder => ({
         id: folder.name,
         nome: folder.name,
         criadoEm: folder.created_at
@@ -1075,6 +1164,11 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       return;
     }
 
+    if (isServerless && !supabase) {
+      sendJson(response, 400, { message: getSupabaseConfigMessage() });
+      return;
+    }
+
     const sectorList = await readSectors();
 
     if (sectorList.some((sector) => sector.id === validation.sector.id)) {
@@ -1092,7 +1186,18 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       }
     }
 
-    const nextSectors = await writeSectors([...sectorList, validation.sector]);
+    let nextSectors;
+    try {
+      nextSectors = await writeSectors([...sectorList, validation.sector]);
+      await ensureSectorStorageRoot(validation.sector.id);
+    } catch (error) {
+      console.error("Erro ao criar setor:", error.message);
+      sendJson(response, error.statusCode || error.status || 500, {
+        message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel salvar o setor."
+      });
+      return;
+    }
+
     sendJson(response, 201, {
       setor: publicSector(validation.sector),
       setores: nextSectors.map(publicSector)
@@ -1107,6 +1212,11 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
 
     if (!sector) {
       sendJson(response, 404, { message: "Setor nao encontrado." });
+      return;
+    }
+
+    if (isServerless && !supabase) {
+      sendJson(response, 400, { message: getSupabaseConfigMessage() });
       return;
     }
 
@@ -1129,7 +1239,17 @@ async function handleFoldersApi(request, response, pathname, searchParams) {
       await fs.rm(resolvedSectorRoot, { recursive: true, force: true });
     }
 
-    const nextSectors = await writeSectors(sectorList.filter((item) => item.id !== sector.id));
+    let nextSectors;
+    try {
+      nextSectors = await writeSectors(sectorList.filter((item) => item.id !== sector.id));
+    } catch (error) {
+      console.error("Erro ao excluir setor:", error.message);
+      sendJson(response, error.statusCode || error.status || 500, {
+        message: !supabaseServiceRoleKey ? getSupabaseConfigMessage() : "Nao foi possivel excluir o setor."
+      });
+      return;
+    }
+
     sendJson(response, 200, {
       ok: true,
       setores: nextSectors.map(publicSector)
