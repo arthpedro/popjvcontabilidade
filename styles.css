@@ -1250,22 +1250,19 @@ main {
 }
 
 .explorer-toolbar {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  gap: 10px;
   padding: 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-soft);
-  align-items: stretch;
 }
 
 .explorer-toolbar-main {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   min-width: 0;
-  width: 100%;
 }
 
 .explorer-path-tools {
@@ -1274,7 +1271,6 @@ main {
   gap: 10px;
   align-items: center;
   min-width: 0;
-  flex: 1;
 }
 
 .explorer-nav-buttons,
@@ -1287,11 +1283,10 @@ main {
 
 .explorer-actions {
   justify-content: flex-start;
-  margin-left: auto;
 }
 
 .explorer-toolbar-editable .explorer-actions {
-  padding-top: 0;
+  padding-top: 2px;
 }
 
 .explorer-address {
@@ -1572,23 +1567,13 @@ main {
     grid-template-columns: 1fr;
   }
 
-  .explorer-toolbar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .explorer-toolbar-main {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
+  .explorer-toolbar-main,
   .explorer-path-tools {
     grid-template-columns: 1fr;
   }
 
   .explorer-actions {
     justify-content: flex-start;
-    width: 100%;
   }
 
   .staff-actions,
