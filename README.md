@@ -1,13 +1,35 @@
 # Portal de POPs
 
-Portal interno para organizar POPs e arquivos por setor, com painel administrativo para setores e usuários. O app roda em Node.js puro e pode usar Supabase para banco/configuração e Storage.
+Portal interno para organizar POPs e arquivos por setor, com painel administrativo
+para setores, usuarios e logs de auditoria. O app roda em Node.js puro e pode usar
+Supabase para banco/configuracao e Storage.
 
-## Requisitos
+## Estrutura
 
-- Node.js compatível com o campo `engines` do `package.json`
-- Conta/projeto Supabase, se quiser persistência em nuvem
+```text
+.
+├── server.js                 # entrypoint local/Vercel
+├── src/
+│   └── server/
+│       ├── app.js            # orquestracao da API e servidor HTTP
+│       ├── config/           # ambiente, constantes, headers e rotas estaticas
+│       ├── domain/           # normalizacao e helpers de usuarios/setores
+│       ├── http/             # helpers de resposta HTTP
+│       └── storage/          # cliente/configuracao do Supabase
+├── public/
+│   ├── index.html            # shell da aplicacao
+│   └── assets/
+│       ├── css/styles.css
+│       ├── js/app.js         # fluxo principal da interface
+│       ├── js/ui/            # componentes pequenos compartilhados
+│       └── img/logo.jpg
+├── dados/                    # dados locais e arquivos dos setores
+├── usuarios.json             # usuarios locais
+├── package.json
+└── vercel.json
+```
 
-## Como Rodar
+## Como rodar
 
 ```bash
 npm install
@@ -28,18 +50,20 @@ SUPABASE_SERVICE_ROLE_KEY=
 DEBUG_LOGS=false
 ```
 
-Sem Supabase, o projeto usa os arquivos locais `usuarios.json` e `dados/setores.json`. Para uploads e alterações em produção/serverless, configure `SUPABASE_SERVICE_ROLE_KEY`.
+Sem Supabase, o projeto usa os arquivos locais `usuarios.json`,
+`dados/setores.json` e `dados/logs.json`. Para uploads e alteracoes em
+producao/serverless, configure `SUPABASE_SERVICE_ROLE_KEY`.
 
-## Validação
+## Validacao
 
 ```bash
 npm run check
 ```
 
-Esse comando valida a sintaxe de `server.js` e `script.js`.
+Esse comando valida a sintaxe do entrypoint, do servidor e dos arquivos JavaScript publicos.
 
-## Observações
+## Observacoes
 
-- Troque as senhas padrão no primeiro acesso.
-- Não publique `.env`; use `.env.example` como referência.
+- Troque as senhas padrao no primeiro acesso.
+- Nao publique `.env`; use `.env.example` como referencia.
 - Ative `DEBUG_LOGS=true` apenas quando precisar investigar comportamento do servidor.

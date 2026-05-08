@@ -3,7 +3,7 @@
   "functions": {
     "server.js": {
       "maxDuration": 10,
-      "includeFiles": "{*.html,*.js,*.css,img/**,dados/**}"
+      "includeFiles": "{src/**,public/**,dados/**,usuarios.json}"
     }
   },
   "rewrites": [
